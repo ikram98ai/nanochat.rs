@@ -391,6 +391,22 @@ impl Tokenizer {
     }
 }
 
+impl Tokenizer {
+    /// Byte length of each token id's decoded string (0 for special tokens),
+    /// as used by the bits-per-byte evaluation.
+    pub fn token_bytes(&self) -> Vec<i32> {
+        (0..self.get_vocab_size() as u32)
+            .map(|id| {
+                if self.special_tokens_decoder.contains_key(&id) {
+                    0 // special characters are not counted
+                } else {
+                    self.decode(&[id]).len() as i32
+                }
+            })
+            .collect()
+    }
+}
+
 impl super::engine::EngineTokenizer for Tokenizer {
     fn encode_special(&self, text: &str) -> u32 {
         Tokenizer::encode_special(self, text)

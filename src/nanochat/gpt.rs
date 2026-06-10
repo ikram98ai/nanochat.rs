@@ -504,6 +504,82 @@ impl GPT {
         ])
     }
 
+    /// Group the parameters of a VarMap-backed model and build the combined
+    /// MuonAdamW optimizer: AdamW for embeddings/lm_head/scalars, Muon for the
+    /// transformer matrices (grouped by shape for stacking).
+    pub fn setup_optimizer(
+        &self,
+        varmap: &candle_nn::VarMap,
+        unembedding_lr: f64,
+        embedding_lr: f64,
+        matrix_lr: f64,
+        weight_decay: f64,
+        scalar_lr: f64,
+    ) -> Result<super::optim::MuonAdamW> {
+        use super::optim::ParamGroup;
+        let model_dim = self.config.n_embd;
+        let n_layer = self.config.n_layer;
+        let vars = varmap.data().lock().unwrap();
+        let get = |name: &str| -> Result<candle_core::Var> {
+            vars.get(name)
+                .cloned()
+                .ok_or_else(|| candle_core::Error::Msg(format!("missing var: {name}")))
+        };
+
+        // Separate out all parameters into groups; matrix params keep module order
+        let mut matrix_params = Vec::new();
+        for i in 0..n_layer {
+            let p = format!("transformer.h.{i}");
+            matrix_params.push(get(&format!("{p}.attn.c_q.weight"))?);
+            matrix_params.push(get(&format!("{p}.attn.c_k.weight"))?);
+            matrix_params.push(get(&format!("{p}.attn.c_v.weight"))?);
+            matrix_params.push(get(&format!("{p}.attn.c_proj.weight"))?);
+            if has_ve(i, n_layer) {
+                matrix_params.push(get(&format!("{p}.attn.ve_gate.weight"))?);
+            }
+            matrix_params.push(get(&format!("{p}.mlp.c_fc.weight"))?);
+            matrix_params.push(get(&format!("{p}.mlp.c_proj.weight"))?);
+        }
+        let mut value_embeds_params = Vec::new();
+        for i in 0..n_layer {
+            if has_ve(i, n_layer) {
+                value_embeds_params.push(get(&format!("value_embeds.{i}.weight"))?);
+            }
+        }
+        let embedding_params = vec![get("transformer.wte.weight")?];
+        let lm_head_params = vec![get("lm_head.weight")?];
+        let resid_params = vec![get("resid_lambdas")?];
+        let x0_params = vec![get("x0_lambdas")?];
+        let smear_params = vec![get("smear_gate.weight")?, get("smear_lambda")?, get("backout_lambda")?];
+
+        // Scale the LR for the AdamW parameters by ∝1/√dmodel (tuned for 768 dim model)
+        let dmodel_lr_scale = (model_dim as f64 / 768.0).powf(-0.5);
+        print0(&format!(
+            "Scaling the LR for the AdamW parameters ∝1/√({model_dim}/768) = {dmodel_lr_scale:.6}"
+        ));
+
+        // Build param_groups with all required fields explicit
+        let mut param_groups = vec![
+            // AdamW groups (embeddings, lm_head, scalars)
+            ParamGroup::adamw(lm_head_params, unembedding_lr * dmodel_lr_scale, (0.8, 0.96), 1e-10, 0.01),
+            ParamGroup::adamw(embedding_params, embedding_lr * dmodel_lr_scale, (0.8, 0.995), 1e-10, 0.001),
+            ParamGroup::adamw(value_embeds_params, embedding_lr * dmodel_lr_scale * 0.5, (0.8, 0.995), 1e-10, 0.01),
+            ParamGroup::adamw(resid_params, scalar_lr * 0.01, (0.8, 0.95), 1e-10, 0.05),
+            ParamGroup::adamw(x0_params, scalar_lr, (0.96, 0.95), 1e-10, 0.0), // higher beta1 for x0
+            ParamGroup::adamw(smear_params, 0.2, (0.8, 0.95), 1e-10, 0.0),
+        ];
+        // Muon groups (matrix params, grouped by shape for stacking)
+        let mut shapes: Vec<Vec<usize>> = matrix_params.iter().map(|p| p.dims().to_vec()).collect();
+        shapes.sort();
+        shapes.dedup();
+        for shape in shapes {
+            let group_params: Vec<_> =
+                matrix_params.iter().filter(|p| p.dims() == shape.as_slice()).cloned().collect();
+            param_groups.push(ParamGroup::muon(group_params, matrix_lr, 0.95, 5, 0.9, weight_decay));
+        }
+        Ok(super::optim::MuonAdamW::new(param_groups))
+    }
+
     /// Forward pass. With targets, returns the scalar cross-entropy loss;
     /// otherwise returns the logits (B, T, vocab_size).
     pub fn forward(
@@ -670,6 +746,10 @@ pub fn cross_entropy(
     // clamp ignored targets to a valid row for the gather, then mask them out
     let gather_idx = targets.clamp(0i64, (vocab_size - 1) as i64)?.unsqueeze(1)?;
     let picked = log_probs.gather(&gather_idx, 1)?.squeeze(1)?;
+    if reduction == "none" {
+        // per-position loss, 0 at ignored targets, flattened like the reference
+        return (picked * &valid)?.neg();
+    }
     let loss_sum = (picked * &valid)?.sum_all()?.neg()?;
     match reduction {
         "sum" => Ok(loss_sum),
