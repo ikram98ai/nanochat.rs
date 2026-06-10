@@ -168,6 +168,56 @@ fn test_spellingbee() {
     }
 }
 
+/// The SFT bestfit-pad packing must produce the exact reference batches,
+/// including the loss masks and padding ignore_index positions.
+#[test]
+fn test_sft_dataloader() {
+    set_base_dir();
+    let meta = load_meta();
+    let tokenizer = Tokenizer::from_directory(&data_dir()).unwrap();
+    let mixture = TaskMixture::new(vec![
+        Box::new(SmolTalk::new("test", Slice::default()).unwrap()),
+        Box::new(MMLU::new("all", "test", Slice::default()).unwrap()),
+    ]);
+    let mut loader =
+        nanochat::dataloader::SftDataLoader::new(&mixture, &tokenizer, 2, 64, true, -1, &Device::Cpu, 6);
+    for (i, expected) in meta["sft_batches"].as_array().unwrap().iter().enumerate() {
+        let (inputs, targets) = loader.next_batch().unwrap();
+        let expected_inputs: Vec<Vec<i64>> = serde_json::from_value(expected["inputs"].clone()).unwrap();
+        let expected_targets: Vec<Vec<i64>> = serde_json::from_value(expected["targets"].clone()).unwrap();
+        assert_eq!(inputs.to_vec2::<i64>().unwrap(), expected_inputs, "sft inputs batch {i}");
+        assert_eq!(targets.to_vec2::<i64>().unwrap(), expected_targets, "sft targets batch {i}");
+    }
+}
+
+#[test]
+fn test_evaluate_core_bundle() {
+    set_base_dir();
+    let meta = load_meta();
+    let train_meta: Value =
+        serde_json::from_str(&std::fs::read_to_string(data_dir().join("train_meta.json")).unwrap())
+            .unwrap();
+    let config: GPTConfig = serde_json::from_value(train_meta["core_model_config"].clone()).unwrap();
+    let weights =
+        candle_core::safetensors::load(data_dir().join("core_model.safetensors"), &Device::Cpu)
+            .unwrap();
+    let vb = VarBuilder::from_tensors(weights, DType::F32, &Device::Cpu);
+    let model = GPT::new(config, vb).unwrap();
+    let tokenizer = Tokenizer::from_directory(&data_dir()).unwrap();
+
+    let results = nanochat::base_eval::evaluate_core(&model, &tokenizer, &Device::Cpu, 8).unwrap();
+    let expected = &meta["evaluate_core"];
+    for (label, acc) in expected["results"].as_object().unwrap() {
+        assert_eq!(results["results"][label].as_f64(), acc.as_f64(), "accuracy {label}");
+    }
+    for (label, centered) in expected["centered_results"].as_object().unwrap() {
+        let actual = results["centered_results"][label].as_f64().unwrap();
+        assert!((actual - centered.as_f64().unwrap()).abs() < 1e-12, "centered {label}");
+    }
+    let core = results["core_metric"].as_f64().unwrap();
+    assert!((core - expected["core_metric"].as_f64().unwrap()).abs() < 1e-12, "core_metric");
+}
+
 #[test]
 fn test_chat_eval_loops() {
     set_base_dir();

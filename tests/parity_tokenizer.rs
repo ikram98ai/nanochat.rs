@@ -109,6 +109,37 @@ fn test_id_to_token() {
     }
 }
 
+/// Training on the same corpus must reproduce the Python-trained tokenizer:
+/// identical merges (incl. tie-breaking) and identical encodings.
+#[test]
+fn test_train_from_iterator_parity() {
+    let corpus = [
+        "Hello world! This is a tiny training corpus for the nanochat tokenizer. ",
+        "The quick brown fox jumps over the lazy dog. 0123456789 42 100 2048. ",
+        "I'd've thought it'll be fine, isn't it? We're sure they've gone. ",
+        "def main():\n    print('hello')\n    return 0\n",
+        "Numbers: 1, 22, 333, 4444. Punctuation?! (parens) [brackets] {braces}. ",
+    ];
+    let texts = corpus.iter().cycle().take(corpus.len() * 20).map(|s| s.to_string());
+    let trained = Tokenizer::train_from_iterator(texts, 300).unwrap();
+    let reference = load_tokenizer();
+
+    assert_eq!(trained.get_vocab_size(), reference.get_vocab_size(), "vocab size");
+    // every token id decodes to the same bytes => identical merge tables
+    for id in 0..trained.get_vocab_size() as u32 {
+        assert_eq!(trained.id_to_token(id), reference.id_to_token(id), "token {id}");
+    }
+    let fx = load_fixtures();
+    for case in fx["encode_cases"].as_array().unwrap() {
+        let text = case["text"].as_str().unwrap();
+        assert_eq!(
+            trained.encode(text, None, None),
+            as_u32s(&case["ids"]),
+            "trained encode({text:?})"
+        );
+    }
+}
+
 #[test]
 fn test_save_load_roundtrip() {
     let tok = load_tokenizer();

@@ -219,6 +219,105 @@ acc_gen = run_generative_eval(gsm8k, tok, model, engine, num_samples=1,
 meta["chat_eval_generative_acc"] = acc_gen
 
 # -----------------------------------------------------------------------------
+# base_eval.evaluate_core over a synthetic eval bundle
+
+import random as pyrandom_mod
+from scripts.base_eval import evaluate_core
+
+bundle_dir = os.path.join(OUT_DIR, "eval_bundle")
+os.makedirs(os.path.join(bundle_dir, "eval_data"), exist_ok=True)
+core_rng = pyrandom_mod.Random(5)
+core_mc_items = [
+    {"query": " ".join(core_rng.choice(words) for _ in range(5)) + "?",
+     "choices": [core_rng.choice(words) for _ in range(3)],
+     "gold": core_rng.randrange(3)}
+    for _ in range(10)
+]
+core_lm_items = [
+    {"context": " ".join(core_rng.choice(words) for _ in range(5)) + " ",
+     "continuation": " " + core_rng.choice(words)}
+    for _ in range(10)
+]
+with open(os.path.join(bundle_dir, "eval_data", "tiny_mc.jsonl"), "w") as f:
+    for item in core_mc_items:
+        f.write(json.dumps(item) + "\n")
+with open(os.path.join(bundle_dir, "eval_data", "tiny_lm.jsonl"), "w") as f:
+    for item in core_lm_items:
+        f.write(json.dumps(item) + "\n")
+with open(os.path.join(bundle_dir, "core.yaml"), "w") as f:
+    f.write("""icl_tasks:
+- label: tiny_mc
+  dataset_uri: tiny_mc.jsonl
+  num_fewshot: [2]
+  icl_task_type: multiple_choice
+  continuation_delimiter: ': '
+- label: tiny_lm
+  dataset_uri: tiny_lm.jsonl
+  num_fewshot: [0]
+  icl_task_type: language_modeling
+""")
+with open(os.path.join(bundle_dir, "eval_meta_data.csv"), "w") as f:
+    f.write("Eval Task,Random baseline\ntiny_mc,33.3\ntiny_lm,0.0\n")
+
+meta["evaluate_core"] = evaluate_core(model, tok, torch.device("cpu"), max_per_task=8)
+
+# -----------------------------------------------------------------------------
+# SFT bestfit-pad data generator (the chat_sft packing logic, single rank)
+
+def sft_data_generator_bos_bestfit(dataset, tokenizer, B, T, buffer_size=100):
+    dataset_size = len(dataset)
+    row_capacity = T + 1
+    bos_token = tokenizer.get_bos_token_id()
+    conv_buffer = []
+    cursor = 0
+    while True:
+        rows, mask_rows, row_lengths = [], [], []
+        for _ in range(B):
+            row, mask_row = [], []
+            padded = False
+            while len(row) < row_capacity:
+                while len(conv_buffer) < buffer_size:
+                    conversation = dataset[cursor]
+                    ids, mask = tokenizer.render_conversation(conversation)
+                    conv_buffer.append((ids, mask))
+                    cursor = (cursor + 1) % dataset_size
+                remaining = row_capacity - len(row)
+                best_idx, best_len = -1, 0
+                for i, (conv, _) in enumerate(conv_buffer):
+                    if len(conv) <= remaining and len(conv) > best_len:
+                        best_idx, best_len = i, len(conv)
+                if best_idx >= 0:
+                    conv, conv_mask = conv_buffer.pop(best_idx)
+                    row.extend(conv)
+                    mask_row.extend(conv_mask)
+                else:
+                    content_len = len(row)
+                    row.extend([bos_token] * remaining)
+                    mask_row.extend([0] * remaining)
+                    padded = True
+                    break
+            row_lengths.append(content_len if padded else row_capacity)
+            rows.append(row[:row_capacity])
+            mask_rows.append(mask_row[:row_capacity])
+        batch_tensor = torch.tensor(rows, dtype=torch.long)
+        inputs = batch_tensor[:, :-1].contiguous()
+        targets = batch_tensor[:, 1:].clone()
+        mask_tensor = torch.tensor(mask_rows, dtype=torch.int8)
+        targets[mask_tensor[:, 1:] == 0] = -1
+        for i, content_len in enumerate(row_lengths):
+            if content_len < row_capacity:
+                targets[i, content_len - 1:] = -1
+        yield inputs, targets
+
+sft_mixture = TaskMixture([make_task(SmolTalk, smoltalk_rows), make_task(MMLU, mmlu_rows)])
+sft_gen = sft_data_generator_bos_bestfit(sft_mixture, tok, B=2, T=64, buffer_size=6)
+sft_batches = []
+for _ in range(3):
+    inputs, targets = next(sft_gen)
+    sft_batches.append({"inputs": inputs.tolist(), "targets": targets.tolist()})
+meta["sft_batches"] = sft_batches
+
+# -----------------------------------------------------------------------------
 with open(os.path.join(OUT_DIR, "tasks_meta.json"), "w") as f:
     json.dump(meta, f, indent=1)
 print(f"categorical acc: {acc_cat}, generative acc: {acc_gen}")

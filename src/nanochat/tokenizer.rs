@@ -392,6 +392,114 @@ impl Tokenizer {
 }
 
 impl Tokenizer {
+    /// Train a BPE tokenizer from an iterator of text in the GPT-4 style:
+    /// pretokenize with the split pattern, then iteratively merge the most
+    /// frequent adjacent token pair (ties broken by the smallest pair).
+    /// The special tokens are appended at the end of the vocabulary.
+    pub fn train_from_iterator(
+        texts: impl Iterator<Item = String>,
+        vocab_size: usize,
+    ) -> Result<Tokenizer> {
+        let vocab_size_no_special = vocab_size - SPECIAL_TOKENS.len();
+        assert!(
+            vocab_size_no_special >= 256,
+            "vocab_size_no_special must be at least 256, got {vocab_size_no_special}"
+        );
+        let pattern = fancy_regex::Regex::new(SPLIT_PATTERN).map_err(msg)?;
+
+        // Pretokenize: count the frequency of each text chunk
+        let mut chunk_counts: HashMap<Vec<u8>, u64> = HashMap::new();
+        for text in texts {
+            for piece in pattern.find_iter(&text) {
+                let piece = piece.map_err(msg)?.as_str().as_bytes().to_vec();
+                *chunk_counts.entry(piece).or_insert(0) += 1;
+            }
+        }
+        // words as token-id sequences (starting as raw bytes), with counts
+        let mut words: Vec<(Vec<u32>, u64)> = chunk_counts
+            .into_iter()
+            .map(|(bytes, count)| (bytes.iter().map(|&b| b as u32).collect(), count))
+            .collect();
+        words.sort(); // deterministic processing order
+
+        // count all adjacent pairs, tracking which words contain each pair
+        let mut pair_counts: HashMap<(u32, u32), i64> = HashMap::new();
+        let mut pair_words: HashMap<(u32, u32), std::collections::HashSet<usize>> = HashMap::new();
+        for (w_idx, (word, count)) in words.iter().enumerate() {
+            for pair in word.windows(2) {
+                let pair = (pair[0], pair[1]);
+                *pair_counts.entry(pair).or_insert(0) += *count as i64;
+                pair_words.entry(pair).or_default().insert(w_idx);
+            }
+        }
+
+        // base vocabulary: the 256 bytes
+        let mut token_bytes: Vec<Vec<u8>> = (0..=255u8).map(|b| vec![b]).collect();
+        let num_merges = vocab_size_no_special - 256;
+        for merge_idx in 0..num_merges {
+            // most frequent pair; ties broken by the smallest pair
+            let best = pair_counts
+                .iter()
+                .filter(|(_, &c)| c > 0)
+                .max_by(|(p1, c1), (p2, c2)| c1.cmp(c2).then(p2.cmp(p1)))
+                .map(|(&p, _)| p);
+            let Some(pair) = best else {
+                break; // no pairs left to merge
+            };
+            let new_id = (256 + merge_idx) as u32;
+            token_bytes.push([token_bytes[pair.0 as usize].clone(), token_bytes[pair.1 as usize].clone()].concat());
+
+            // merge the pair in every word that contains it, updating pair counts
+            let affected: Vec<usize> =
+                pair_words.remove(&pair).map(|s| s.into_iter().collect()).unwrap_or_default();
+            for w_idx in affected {
+                let (word, count) = &words[w_idx];
+                let count = *count as i64;
+                // remove this word's contribution to the pair counts
+                for p in word.windows(2) {
+                    let p = (p[0], p[1]);
+                    *pair_counts.entry(p).or_insert(0) -= count;
+                    if p != pair {
+                        if let Some(set) = pair_words.get_mut(&p) {
+                            set.remove(&w_idx);
+                        }
+                    }
+                }
+                // apply the merge
+                let mut merged = Vec::with_capacity(word.len());
+                let mut i = 0;
+                while i < word.len() {
+                    if i + 1 < word.len() && word[i] == pair.0 && word[i + 1] == pair.1 {
+                        merged.push(new_id);
+                        i += 2;
+                    } else {
+                        merged.push(word[i]);
+                        i += 1;
+                    }
+                }
+                // add the new contribution back
+                for p in merged.windows(2) {
+                    let p = (p[0], p[1]);
+                    *pair_counts.entry(p).or_insert(0) += count;
+                    pair_words.entry(p).or_default().insert(w_idx);
+                }
+                words[w_idx].0 = merged;
+            }
+            pair_counts.remove(&pair);
+        }
+
+        // construct the tokenizer: mergeable ranks then special tokens at the end
+        let mergeable_ranks: HashMap<Vec<u8>, u32> =
+            token_bytes.into_iter().enumerate().map(|(rank, bytes)| (bytes, rank as u32)).collect();
+        let tokens_offset = mergeable_ranks.len() as u32;
+        let special_tokens: HashMap<String, u32> = SPECIAL_TOKENS
+            .iter()
+            .enumerate()
+            .map(|(i, name)| (name.to_string(), tokens_offset + i as u32))
+            .collect();
+        Tokenizer::new(SPLIT_PATTERN, mergeable_ranks, special_tokens, "<|bos|>")
+    }
+
     /// Byte length of each token id's decoded string (0 for special tokens),
     /// as used by the bits-per-byte evaluation.
     pub fn token_bytes(&self) -> Vec<i32> {

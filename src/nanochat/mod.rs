@@ -1,3 +1,4 @@
+pub mod base_eval;
 pub mod chat_eval;
 pub mod checkpoint_manager;
 pub mod common;

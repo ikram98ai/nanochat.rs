@@ -193,6 +193,55 @@ pub fn find_last_step(checkpoint_dir: &Path) -> Result<usize> {
     Ok(last_step_str.parse::<usize>().unwrap())
 }
 
+/// Build a trainable model (VarMap-backed parameters) from a checkpoint.
+/// Returns the model, its VarMap, the tokenizer, and the training meta data.
+pub fn build_model_for_training(
+    checkpoint_dir: &Path,
+    step: usize,
+    device: &Device,
+) -> Result<(GPT, candle_nn::VarMap, Tokenizer, Value)> {
+    let (model_data, meta_data) = load_checkpoint(checkpoint_dir, step, device)?;
+    let mut model_data: HashMap<String, Tensor> = model_data
+        .into_iter()
+        .map(|(k, v)| {
+            let k = k.strip_prefix("_orig_mod.").unwrap_or(&k).to_string();
+            let v = if v.dtype() != DType::F32 { v.to_dtype(DType::F32)? } else { v };
+            Ok((k, v))
+        })
+        .collect::<Result<_>>()?;
+    let mut model_config_value = meta_data["model_config"].clone();
+    patch_missing_config_keys(&mut model_config_value);
+    let model_config: GPTConfig = serde_json::from_value(model_config_value).map_err(msg)?;
+    patch_missing_keys(&mut model_data, &model_config, device)?;
+    let mut varmap = candle_nn::VarMap::new();
+    let vb = VarBuilder::from_varmap(&varmap, DType::F32, device);
+    let model = GPT::new(model_config.clone(), vb)?;
+    varmap.set(model_data.iter().map(|(k, v)| (k, v)))?;
+    let tokenizer = get_tokenizer()?;
+    assert!(
+        tokenizer.get_vocab_size() == model_config.vocab_size,
+        "Tokenizer vocab size {} does not match model config vocab size {}",
+        tokenizer.get_vocab_size(),
+        model_config.vocab_size
+    );
+    Ok((model, varmap, tokenizer, meta_data))
+}
+
+/// Load just the optimizer state for a given step, if present.
+pub fn load_optimizer_state(
+    checkpoint_dir: &Path,
+    step: usize,
+    device: &Device,
+) -> Result<Option<HashMap<String, Tensor>>> {
+    let optimizer_path = checkpoint_dir.join(format!("optim_{step:06}_rank0.safetensors"));
+    if !optimizer_path.exists() {
+        log0(&format!("Optimizer checkpoint not found: {}", optimizer_path.display()));
+        return Ok(None);
+    }
+    log0(&format!("Loading optimizer state from {}", optimizer_path.display()));
+    Ok(Some(candle_core::safetensors::load(&optimizer_path, device)?))
+}
+
 // -----------------------------------------------------------------------------
 // convenience functions that take into account nanochat's directory structure
 

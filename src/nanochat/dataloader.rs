@@ -12,6 +12,7 @@ use candle_core::{DType, Device, Result, Tensor};
 use serde::{Deserialize, Serialize};
 
 use super::dataset::{list_parquet_files, num_row_groups, read_row_group_texts};
+use super::tasks::common::Task;
 use super::tokenizer::Tokenizer;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -254,5 +255,172 @@ impl<'a> DataLoader<'a> {
         let inputs = Tensor::from_vec(inputs, (b, t), &self.device)?.to_dtype(DType::I64)?;
         let targets = Tensor::from_vec(targets, (b, t), &self.device)?.to_dtype(DType::I64)?;
         Ok((inputs, targets, self.state.clone()))
+    }
+}
+
+/// BOS-aligned dataloader for SFT with bestfit-pad packing.
+///
+/// Each row in the batch starts with BOS (beginning of a conversation).
+/// Conversations are packed using a best-fit algorithm. When no conversation
+/// fits, the row is padded (instead of cropping) so no tokens are discarded.
+/// Padding positions and non-assistant tokens have targets masked with -1
+/// (ignore_index for cross-entropy).
+pub struct SftDataLoader<'a> {
+    dataset: &'a dyn Task,
+    tokenizer: &'a Tokenizer,
+    batch_size: usize,
+    seq_len: usize,
+    buffer_size: usize,
+    device: Device,
+    is_train: bool,
+    /// number of optimization steps (-1 = full epoch)
+    num_iterations: i64,
+    conv_buffer: Vec<(Vec<u32>, Vec<u8>)>,
+    cursor: usize,
+    consumed: usize,
+    epoch: usize,
+    it: usize,
+    /// toggled when the end of the training dataset is reached
+    pub last_step: bool,
+    /// goes from 0 to 1 over the course of the epoch
+    pub approx_progress: f64,
+    pub current_epoch: usize,
+}
+
+impl<'a> SftDataLoader<'a> {
+    pub fn new(
+        dataset: &'a dyn Task,
+        tokenizer: &'a Tokenizer,
+        batch_size: usize,
+        seq_len: usize,
+        is_train: bool,
+        num_iterations: i64,
+        device: &Device,
+        buffer_size: usize,
+    ) -> Self {
+        assert!(dataset.len() > 0);
+        Self {
+            dataset,
+            tokenizer,
+            batch_size,
+            seq_len,
+            buffer_size,
+            device: device.clone(),
+            is_train,
+            num_iterations,
+            conv_buffer: Vec::new(),
+            cursor: 0,
+            consumed: 0,
+            epoch: 1,
+            it: 0,
+            last_step: false,
+            approx_progress: 0.0,
+            current_epoch: 1,
+        }
+    }
+
+    fn refill_buffer(&mut self) -> Result<()> {
+        let dataset_size = self.dataset.len();
+        while self.conv_buffer.len() < self.buffer_size {
+            let conversation = self.dataset.get(self.cursor)?;
+            let (ids, mask) = self.tokenizer.render_conversation(&conversation, 2048)?;
+            self.conv_buffer.push((ids, mask));
+            self.cursor += 1;
+            if self.cursor >= dataset_size {
+                self.cursor %= dataset_size;
+                self.epoch += 1;
+                // last_step is triggered based on consumption, not fetching
+            }
+        }
+        Ok(())
+    }
+
+    /// Build the next (inputs, targets) batch of (B, T) i64 tensors.
+    pub fn next_batch(&mut self) -> Result<(Tensor, Tensor)> {
+        let row_capacity = self.seq_len + 1; // +1 for target at last position
+        let bos_token = self.tokenizer.get_bos_token_id();
+        let dataset_size = self.dataset.len();
+
+        let mut rows: Vec<Vec<u32>> = Vec::with_capacity(self.batch_size);
+        let mut mask_rows: Vec<Vec<u8>> = Vec::with_capacity(self.batch_size);
+        let mut row_lengths = Vec::with_capacity(self.batch_size); // content length per row
+        for _ in 0..self.batch_size {
+            let mut row: Vec<u32> = Vec::with_capacity(row_capacity);
+            let mut mask_row: Vec<u8> = Vec::with_capacity(row_capacity);
+            let mut content_len = row_capacity;
+            while row.len() < row_capacity {
+                self.refill_buffer()?;
+                let remaining = row_capacity - row.len();
+
+                // Find largest conversation that fits entirely (ties keep the first)
+                let mut best_idx: Option<usize> = None;
+                let mut best_len = 0;
+                for (i, (conv, _)) in self.conv_buffer.iter().enumerate() {
+                    if conv.len() <= remaining && conv.len() > best_len {
+                        best_idx = Some(i);
+                        best_len = conv.len();
+                    }
+                }
+
+                match best_idx {
+                    Some(best_idx) => {
+                        // Found a conversation that fits - use it entirely
+                        let (conv, conv_mask) = self.conv_buffer.remove(best_idx);
+                        row.extend(&conv);
+                        mask_row.extend(&conv_mask);
+                        self.consumed += 1;
+                    }
+                    None => {
+                        // No conversation fits - pad the remainder instead of cropping
+                        content_len = row.len();
+                        row.extend(std::iter::repeat(bos_token).take(remaining));
+                        mask_row.extend(std::iter::repeat(0).take(remaining));
+                        break;
+                    }
+                }
+            }
+            row.truncate(row_capacity);
+            mask_row.truncate(row_capacity);
+            row_lengths.push(content_len);
+            rows.push(row);
+            mask_rows.push(mask_row);
+        }
+
+        // Stopping condition to respect num_iterations, if given
+        self.it += 1;
+        if self.is_train {
+            if self.num_iterations > 0 && self.num_iterations <= self.it as i64 {
+                self.last_step = true;
+            }
+            self.current_epoch = self.epoch;
+            self.approx_progress = if self.num_iterations > 0 {
+                self.it as f64 / self.num_iterations as f64
+            } else {
+                self.consumed as f64 / dataset_size as f64
+            };
+            // Trigger last_step when we've consumed enough
+            if self.consumed >= dataset_size {
+                self.last_step = true;
+            }
+        }
+
+        // Build tensors: inputs = tokens[:-1], targets = tokens[1:] with the
+        // loss mask applied (mask=1 only for assistant completions) and padding
+        // positions set to -1 (ignore_index)
+        let (b, t) = (self.batch_size, self.seq_len);
+        let mut inputs = Vec::with_capacity(b * t);
+        let mut targets = Vec::with_capacity(b * t);
+        for (i, (row, mask_row)) in rows.iter().zip(mask_rows.iter()).enumerate() {
+            inputs.extend(row[..t].iter().map(|&tok| tok as i64));
+            for pos in 0..t {
+                let target_pos = pos + 1;
+                let masked = mask_row[target_pos] == 0
+                    || (row_lengths[i] < row_capacity && target_pos >= row_lengths[i]);
+                targets.push(if masked { -1i64 } else { row[target_pos] as i64 });
+            }
+        }
+        let inputs = Tensor::from_vec(inputs, (b, t), &self.device)?;
+        let targets = Tensor::from_vec(targets, (b, t), &self.device)?;
+        Ok((inputs, targets))
     }
 }

@@ -1,0 +1,10 @@
+icl_tasks:
+- label: tiny_mc
+  dataset_uri: tiny_mc.jsonl
+  num_fewshot: [2]
+  icl_task_type: multiple_choice
+  continuation_delimiter: ': '
+- label: tiny_lm
+  dataset_uri: tiny_lm.jsonl
+  num_fewshot: [0]
+  icl_task_type: language_modeling
