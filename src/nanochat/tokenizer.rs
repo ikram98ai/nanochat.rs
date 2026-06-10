@@ -1,120 +1,416 @@
-use candle_core::{Result};
-use std::path::{Path};
-use tokenizers::Tokenizer as TokenizerInternal;
+//! BPE Tokenizer in the style of GPT-4.
+//!
+//! Byte-pair encoding over a learned merge table with a GPT-4-style split
+//! pattern, equivalent to the tiktoken encoding used for inference by the
+//! Python version. Training the tokenizer happens in Python; this loads the
+//! exported {pattern, mergeable_ranks, special_tokens} as JSON.
 
-#[allow(dead_code)]
-pub enum ContentPart {
-    Text(String),
-    Image(String),
+use std::collections::HashMap;
+use std::path::Path;
+
+use base64::Engine as _;
+use candle_core::Result;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use super::common::get_base_dir;
+
+pub const SPECIAL_TOKENS: [&str; 9] = [
+    // every document begins with the Beginning of Sequence (BOS) token that delimits documents
+    "<|bos|>",
+    // tokens below are only used during finetuning to render Conversations into token ids
+    "<|user_start|>", // user messages
+    "<|user_end|>",
+    "<|assistant_start|>", // assistant messages
+    "<|assistant_end|>",
+    "<|python_start|>", // assistant invokes python REPL tool
+    "<|python_end|>",
+    "<|output_start|>", // python REPL outputs back to assistant
+    "<|output_end|>",
+];
+
+/// NOTE: this split pattern deviates from GPT-4 in that we use \p{N}{1,2} instead of \p{N}{1,3}
+/// to not "waste" too many tokens on numbers for smaller vocab sizes.
+pub const SPLIT_PATTERN: &str = r"'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+";
+
+fn msg(e: impl std::fmt::Display) -> candle_core::Error {
+    candle_core::Error::Msg(e.to_string())
 }
 
-#[allow(dead_code)]
-pub struct Message {
-    pub role: String,
-    pub content: MessageContent,
+// -----------------------------------------------------------------------------
+// Core byte-pair encoding (the tiktoken algorithm)
+
+const RANK_MAX: u32 = u32::MAX;
+
+/// Iteratively merge the lowest-rank adjacent pair until no merge applies.
+/// Returns the boundaries of the resulting parts as (start, rank) entries.
+fn byte_pair_merge(ranks: &HashMap<Vec<u8>, u32>, piece: &[u8]) -> Vec<(usize, u32)> {
+    // parts[i] = (start index, rank of the pair starting at that index)
+    let mut parts = Vec::with_capacity(piece.len() + 1);
+    let mut min_rank: (u32, usize) = (RANK_MAX, usize::MAX);
+    for i in 0..piece.len() - 1 {
+        let rank = *ranks.get(&piece[i..i + 2]).unwrap_or(&RANK_MAX);
+        if rank < min_rank.0 {
+            min_rank = (rank, i);
+        }
+        parts.push((i, rank));
+    }
+    parts.push((piece.len() - 1, RANK_MAX));
+    parts.push((piece.len(), RANK_MAX));
+
+    let get_rank = |parts: &Vec<(usize, u32)>, i: usize| {
+        if (i + 3) < parts.len() {
+            *ranks.get(&piece[parts[i].0..parts[i + 3].0]).unwrap_or(&RANK_MAX)
+        } else {
+            RANK_MAX
+        }
+    };
+
+    while min_rank.0 != RANK_MAX {
+        let i = min_rank.1;
+        // Update parts[i] and parts[i - 1] before removing parts[i + 1]
+        if i > 0 {
+            parts[i - 1].1 = get_rank(&parts, i - 1);
+        }
+        parts[i].1 = get_rank(&parts, i);
+        parts.remove(i + 1);
+
+        min_rank = (RANK_MAX, usize::MAX);
+        for (j, &(_, rank)) in parts[..parts.len() - 1].iter().enumerate() {
+            if rank < min_rank.0 {
+                min_rank = (rank, j);
+            }
+        }
+    }
+    parts
 }
 
-#[allow(dead_code)]
-pub enum MessageContent {
-    Simple(String),
-    Parts(Vec<ContentPart>),
+fn byte_pair_encode(piece: &[u8], ranks: &HashMap<Vec<u8>, u32>) -> Vec<u32> {
+    if piece.len() == 1 {
+        return vec![ranks[piece]];
+    }
+    byte_pair_merge(ranks, piece)
+        .windows(2)
+        .map(|w| ranks[&piece[w[0].0..w[1].0]])
+        .collect()
 }
 
-#[allow(dead_code)]
-pub struct Conversation {
-    pub messages: Vec<Message>,
-    pub tools: Option<Vec<String>>,
+// -----------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize)]
+struct RankEntry {
+    bytes: String, // base64
+    rank: u32,
 }
 
-#[derive(Clone)]
+#[derive(Serialize, Deserialize)]
+struct TokenizerFile {
+    pattern: String,
+    mergeable_ranks: Vec<RankEntry>,
+    special_tokens: HashMap<String, u32>,
+}
+
 pub struct Tokenizer {
-    inner: TokenizerInternal,
+    pattern: fancy_regex::Regex,
+    pattern_str: String,
+    encoder: HashMap<Vec<u8>, u32>,
+    decoder: HashMap<u32, Vec<u8>>,
+    special_tokens: HashMap<String, u32>,
+    special_tokens_decoder: HashMap<u32, String>,
+    bos_token_id: u32,
 }
 
 impl Tokenizer {
-    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let inner = TokenizerInternal::from_file(path)
-            .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
-        Ok(Self { inner })
+    pub fn new(
+        pattern: &str,
+        mergeable_ranks: HashMap<Vec<u8>, u32>,
+        special_tokens: HashMap<String, u32>,
+        bos_token: &str,
+    ) -> Result<Self> {
+        let regex = fancy_regex::Regex::new(pattern).map_err(msg)?;
+        let decoder: HashMap<u32, Vec<u8>> =
+            mergeable_ranks.iter().map(|(k, v)| (*v, k.clone())).collect();
+        let special_tokens_decoder: HashMap<u32, String> =
+            special_tokens.iter().map(|(k, v)| (*v, k.clone())).collect();
+        let bos_token_id = *special_tokens
+            .get(bos_token)
+            .ok_or_else(|| msg(format!("Failed to find BOS token {bos_token} in tokenizer")))?;
+        Ok(Self {
+            pattern: regex,
+            pattern_str: pattern.to_string(),
+            encoder: mergeable_ranks,
+            decoder,
+            special_tokens,
+            special_tokens_decoder,
+            bos_token_id,
+        })
     }
 
-    pub fn encode(&self, text: &str, add_special: bool) -> Result<Vec<u32>> {
-        let encoding = self.inner.encode(text, add_special)
-            .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
-        Ok(encoding.get_ids().to_vec())
-    }
-
-    pub fn encode_special(&self, text: &str) -> u32 {
-        self.inner.token_to_id(text).unwrap_or(0)
-    }
-
-    #[allow(dead_code)]
-    pub fn encode_with_special(&self, text: &str, _prepend: Option<u32>, _append: Option<u32>) -> Result<Vec<u32>> {
-        self.encode(text, false)
-    }
-
-    #[allow(dead_code)]
-    pub fn encode_batch(&self, texts: &[&str], _prepend: Option<u32>, _append: Option<u32>) -> Result<Vec<Vec<u32>>> {
-        let mut results = Vec::new();
-        for text in texts {
-            results.push(self.encode(text, false)?);
+    pub fn from_directory(tokenizer_dir: &Path) -> Result<Self> {
+        let path = tokenizer_dir.join("tokenizer.json");
+        let data = std::fs::read_to_string(&path)
+            .map_err(|e| msg(format!("Error reading {}: {e}", path.display())))?;
+        let file: TokenizerFile = serde_json::from_str(&data).map_err(msg)?;
+        let mut mergeable_ranks = HashMap::new();
+        for entry in &file.mergeable_ranks {
+            let bytes = base64::engine::general_purpose::STANDARD.decode(&entry.bytes).map_err(msg)?;
+            mergeable_ranks.insert(bytes, entry.rank);
         }
-        Ok(results)
+        Self::new(&file.pattern, mergeable_ranks, file.special_tokens, "<|bos|>")
     }
 
-    #[allow(dead_code)]
-    pub fn get_vocab_size(&self) -> usize {
-        self.inner.get_vocab_size(true)
-    }
-
-    pub fn token_to_id(&self, token: &str) -> Option<u32> {
-        self.inner.token_to_id(token)
-    }
-
-    #[allow(dead_code)]
-    pub fn id_to_token(&self, id: u32) -> Option<String> {
-        self.inner.id_to_token(id)
-    }
-
-    pub fn decode(&self, ids: &[u32], skip_special: bool) -> Result<String> {
-        self.inner.decode(ids, skip_special)
-            .map_err(|e| candle_core::Error::Msg(e.to_string()))
-    }
-
-    pub fn get_bos_token_id(&self) -> u32 {
-        self.inner.token_to_id("<|bos|>").unwrap_or(0)
-    }
-
-    #[allow(dead_code)]
-    pub fn get_special_tokens(&self) -> Vec<String> {
-        vec![]
-    }
-
-    #[allow(dead_code)]
-    pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
-        self.inner.save(path.as_ref(), true)
-            .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+    pub fn save(&self, tokenizer_dir: &Path) -> Result<()> {
+        std::fs::create_dir_all(tokenizer_dir).map_err(msg)?;
+        let path = tokenizer_dir.join("tokenizer.json");
+        let mut ranks: Vec<(&Vec<u8>, &u32)> = self.encoder.iter().collect();
+        ranks.sort_by_key(|(_, rank)| **rank);
+        let file = TokenizerFile {
+            pattern: self.pattern_str.clone(),
+            mergeable_ranks: ranks
+                .into_iter()
+                .map(|(bytes, rank)| RankEntry {
+                    bytes: base64::engine::general_purpose::STANDARD.encode(bytes),
+                    rank: *rank,
+                })
+                .collect(),
+            special_tokens: self.special_tokens.clone(),
+        };
+        std::fs::write(&path, serde_json::to_string(&file).map_err(msg)?).map_err(msg)?;
+        println!("Saved tokenizer to {}", path.display());
         Ok(())
     }
 
-    #[allow(dead_code)]
-    pub fn render_conversation(&self, _conv: &Conversation, _max_tokens: usize) -> Result<(Vec<u32>, Vec<u8>)> {
-        Ok((vec![], vec![]))
+    /// n_vocab = max token id + 1
+    pub fn get_vocab_size(&self) -> usize {
+        let max_rank = self.encoder.values().max().copied().unwrap_or(0);
+        let max_special = self.special_tokens.values().max().copied().unwrap_or(0);
+        max_rank.max(max_special) as usize + 1
     }
 
-    #[allow(dead_code)]
-    pub fn render_for_completion(&self, _conv: &Conversation) -> Result<Vec<u32>> {
-        Ok(vec![])
+    pub fn get_special_tokens(&self) -> Vec<String> {
+        self.special_tokens.keys().cloned().collect()
     }
 
-    #[allow(dead_code)]
-    pub fn visualize_tokenization(&self, _ids: &[u32], _mask: &[u8]) -> Result<String> {
-        Ok(String::new())
+    pub fn id_to_token(&self, id: u32) -> String {
+        self.decode(&[id])
+    }
+
+    /// encode a single special token via exact match
+    pub fn encode_special(&self, text: &str) -> u32 {
+        self.special_tokens[text]
+    }
+
+    pub fn get_bos_token_id(&self) -> u32 {
+        self.bos_token_id
+    }
+
+    /// Encode ordinary text (no special token handling).
+    pub fn encode_ordinary(&self, text: &str) -> Vec<u32> {
+        let mut ids = Vec::new();
+        for piece in self.pattern.find_iter(text) {
+            let piece = piece.expect("regex find failure").as_str().as_bytes();
+            match self.encoder.get(piece) {
+                Some(&id) => ids.push(id),
+                None => ids.extend(byte_pair_encode(piece, &self.encoder)),
+            }
+        }
+        ids
+    }
+
+    pub fn encode(&self, text: &str, prepend: Option<&str>, append: Option<&str>) -> Vec<u32> {
+        let mut ids = self.encode_ordinary(text);
+        if let Some(prepend) = prepend {
+            ids.insert(0, self.encode_special(prepend));
+        }
+        if let Some(append) = append {
+            ids.push(self.encode_special(append));
+        }
+        ids
+    }
+
+    pub fn encode_batch(&self, texts: &[&str]) -> Vec<Vec<u32>> {
+        texts.iter().map(|t| self.encode_ordinary(t)).collect()
+    }
+
+    pub fn decode(&self, ids: &[u32]) -> String {
+        let mut bytes = Vec::new();
+        for id in ids {
+            if let Some(b) = self.decoder.get(id) {
+                bytes.extend_from_slice(b);
+            } else if let Some(s) = self.special_tokens_decoder.get(id) {
+                bytes.extend_from_slice(s.as_bytes());
+            }
+        }
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    /// Tokenize a single Chat conversation (a JSON object with a "messages" list).
+    /// Returns:
+    /// - ids: token ids of this rendered conversation
+    /// - mask: same length, 1 for tokens that the Assistant is expected to train on
+    pub fn render_conversation(
+        &self,
+        conversation: &Value,
+        max_tokens: usize,
+    ) -> Result<(Vec<u32>, Vec<u8>)> {
+        let mut ids: Vec<u32> = Vec::new();
+        let mut mask: Vec<u8> = Vec::new();
+        let add_tokens = |ids: &mut Vec<u32>, mask: &mut Vec<u8>, token_ids: &[u32], mask_val: u8| {
+            ids.extend_from_slice(token_ids);
+            mask.extend(std::iter::repeat(mask_val).take(token_ids.len()));
+        };
+
+        let messages = conversation["messages"]
+            .as_array()
+            .ok_or_else(|| msg("Conversation must have a messages list"))?;
+        // sometimes the first message is a system message...
+        // => just merge it with the second (user) message
+        let mut messages: Vec<Value> = messages.clone();
+        if messages.first().and_then(|m| m["role"].as_str()) == Some("system") {
+            assert!(
+                messages.get(1).and_then(|m| m["role"].as_str()) == Some("user"),
+                "System message must be followed by a user message"
+            );
+            let system_content = messages[0]["content"].as_str().unwrap_or_default().to_string();
+            let user_content = messages[1]["content"].as_str().unwrap_or_default().to_string();
+            messages[1]["content"] = Value::String(format!("{system_content}\n\n{user_content}"));
+            messages.remove(0);
+        }
+        assert!(!messages.is_empty(), "Conversation has less than 1 message");
+
+        // fetch all the special tokens we need
+        let bos = self.get_bos_token_id();
+        let user_start = self.encode_special("<|user_start|>");
+        let user_end = self.encode_special("<|user_end|>");
+        let assistant_start = self.encode_special("<|assistant_start|>");
+        let assistant_end = self.encode_special("<|assistant_end|>");
+        let python_start = self.encode_special("<|python_start|>");
+        let python_end = self.encode_special("<|python_end|>");
+        let output_start = self.encode_special("<|output_start|>");
+        let output_end = self.encode_special("<|output_end|>");
+
+        // now we can tokenize the conversation
+        add_tokens(&mut ids, &mut mask, &[bos], 0);
+        for (i, message) in messages.iter().enumerate() {
+            // some sanity checking here around assumptions, to prevent footguns
+            let must_be_from = if i % 2 == 0 { "user" } else { "assistant" };
+            let role = message["role"].as_str().unwrap_or_default();
+            assert!(
+                role == must_be_from,
+                "Message {i} is from {role} but should be from {must_be_from}"
+            );
+
+            // content can be either a simple string or a list of parts (e.g. containing tool calls)
+            let content = &message["content"];
+
+            if role == "user" {
+                let content = content
+                    .as_str()
+                    .expect("User messages are simply expected to be strings");
+                let value_ids = self.encode_ordinary(content);
+                add_tokens(&mut ids, &mut mask, &[user_start], 0);
+                add_tokens(&mut ids, &mut mask, &value_ids, 0);
+                add_tokens(&mut ids, &mut mask, &[user_end], 0);
+            } else {
+                add_tokens(&mut ids, &mut mask, &[assistant_start], 0);
+                if let Some(content) = content.as_str() {
+                    // simple string => simply add the tokens
+                    let value_ids = self.encode_ordinary(content);
+                    add_tokens(&mut ids, &mut mask, &value_ids, 1);
+                } else if let Some(parts) = content.as_array() {
+                    for part in parts {
+                        let text = part["text"].as_str().unwrap_or_default();
+                        let value_ids = self.encode_ordinary(text);
+                        match part["type"].as_str().unwrap_or_default() {
+                            // string part => simply add the tokens
+                            "text" => add_tokens(&mut ids, &mut mask, &value_ids, 1),
+                            // python tool call => tokens inside <|python_start|> and <|python_end|>
+                            "python" => {
+                                add_tokens(&mut ids, &mut mask, &[python_start], 1);
+                                add_tokens(&mut ids, &mut mask, &value_ids, 1);
+                                add_tokens(&mut ids, &mut mask, &[python_end], 1);
+                            }
+                            // python output => tokens inside <|output_start|> and <|output_end|>
+                            // none of these tokens are supervised because they come from Python at test time
+                            "python_output" => {
+                                add_tokens(&mut ids, &mut mask, &[output_start], 0);
+                                add_tokens(&mut ids, &mut mask, &value_ids, 0);
+                                add_tokens(&mut ids, &mut mask, &[output_end], 0);
+                            }
+                            other => panic!("Unknown part type: {other}"),
+                        }
+                    }
+                } else {
+                    panic!("Unknown content type");
+                }
+                add_tokens(&mut ids, &mut mask, &[assistant_end], 1);
+            }
+        }
+
+        // truncate to max_tokens tokens MAX (helps prevent OOMs)
+        ids.truncate(max_tokens);
+        mask.truncate(max_tokens);
+        Ok((ids, mask))
+    }
+
+    /// Small helper function useful in debugging: visualize the tokenization of render_conversation
+    pub fn visualize_tokenization(&self, ids: &[u32], mask: &[u8]) -> String {
+        const RED: &str = "\x1b[91m";
+        const GREEN: &str = "\x1b[92m";
+        const RESET: &str = "\x1b[0m";
+        let tokens: Vec<String> = ids
+            .iter()
+            .zip(mask.iter())
+            .map(|(&id, &m)| {
+                let color = if m == 1 { GREEN } else { RED };
+                format!("{color}{}{RESET}", self.decode(&[id]))
+            })
+            .collect();
+        tokens.join("|")
+    }
+
+    /// Used during Reinforcement Learning: render the conversation priming the
+    /// Assistant for a completion. Unlike the Chat SFT case, no mask is needed.
+    pub fn render_for_completion(&self, conversation: &Value) -> Result<Vec<u32>> {
+        // We have some surgery to do: we need to pop the last message (of the Assistant)
+        let mut conversation = conversation.clone();
+        let messages = conversation["messages"]
+            .as_array_mut()
+            .ok_or_else(|| msg("Conversation must have a messages list"))?;
+        let last_role = messages.last().and_then(|m| m["role"].as_str());
+        assert!(last_role == Some("assistant"), "Last message must be from the Assistant");
+        messages.pop(); // remove the last message (of the Assistant)
+
+        // Now tokenize the conversation
+        let (mut ids, _mask) = self.render_conversation(&conversation, 2048)?;
+
+        // Finally, to prime the Assistant for a completion, append the Assistant start token
+        let assistant_start = self.encode_special("<|assistant_start|>");
+        ids.push(assistant_start);
+        Ok(ids)
     }
 }
 
-#[allow(dead_code)]
+impl super::engine::EngineTokenizer for Tokenizer {
+    fn encode_special(&self, text: &str) -> u32 {
+        Tokenizer::encode_special(self, text)
+    }
+    fn get_bos_token_id(&self) -> u32 {
+        Tokenizer::get_bos_token_id(self)
+    }
+    fn encode(&self, text: &str) -> Vec<u32> {
+        self.encode_ordinary(text)
+    }
+    fn decode(&self, tokens: &[u32]) -> String {
+        Tokenizer::decode(self, tokens)
+    }
+}
+
+// -----------------------------------------------------------------------------
+// nanochat-specific convenience functions
+
 pub fn get_tokenizer() -> Result<Tokenizer> {
-    let path = crate::nanochat::common::get_base_dir().join("tokenizer.json");
-    Tokenizer::from_file(path)
+    let base_dir = get_base_dir();
+    let tokenizer_dir = base_dir.join("tokenizer");
+    Tokenizer::from_directory(&tokenizer_dir)
 }

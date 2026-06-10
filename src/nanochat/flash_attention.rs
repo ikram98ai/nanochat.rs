@@ -1,86 +1,166 @@
-use candle_core::{Tensor, Result, DType};
-use candle_nn::ops;
+//! Unified attention interface mirroring the FA3 API, implemented with a
+//! scaled-dot-product-attention fallback (the CPU code path of the Python
+//! version). Tensors are (B, T, H, D); window_size is a (left, right) tuple
+//! where -1 means unlimited.
 
-/// Flash attention function using SDPA as backend.
+use candle_core::{D, DType, Result, Tensor};
+use candle_nn::ops::softmax;
+
+use super::engine::KVCache;
+
+/// Scaled dot product attention with a bool mask (true = keep) and GQA support.
+/// q, k, v are (B, H, T, D) format.
+fn scaled_dot_product_attention(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    attn_mask: Option<&Tensor>,
+    is_causal: bool,
+    enable_gqa: bool,
+) -> Result<Tensor> {
+    let (b, h_q, t_q, d) = q.dims4()?;
+    let (_, h_kv, t_k, _) = k.dims4()?;
+
+    // GQA: repeat each kv head to match the number of query heads
+    let (k, v) = if enable_gqa {
+        let n_rep = h_q / h_kv;
+        let repeat = |t: &Tensor| -> Result<Tensor> {
+            t.unsqueeze(2)?
+                .expand((b, h_kv, n_rep, t_k, d))?
+                .reshape((b, h_q, t_k, d))
+        };
+        (repeat(k)?, repeat(v)?)
+    } else {
+        (k.clone(), v.clone())
+    };
+
+    let scale = 1.0 / (d as f64).sqrt();
+    let mut scores = (q.contiguous()?.matmul(&k.contiguous()?.t()?)? * scale)?;
+
+    let mask = if let Some(m) = attn_mask {
+        Some(m.clone())
+    } else if is_causal {
+        // standard causal mask: row i attends to columns j <= i
+        let row_idx = Tensor::arange(0u32, t_q as u32, q.device())?.unsqueeze(1)?;
+        let col_idx = Tensor::arange(0u32, t_k as u32, q.device())?.unsqueeze(0)?;
+        Some(col_idx.broadcast_le(&row_idx)?)
+    } else {
+        None
+    };
+    if let Some(mask) = mask {
+        // additive (Tq, Tk) mask broadcast over batch and heads: 0 keeps, -inf drops
+        let zeros = Tensor::zeros((t_q, t_k), scores.dtype(), scores.device())?;
+        let neg_inf = Tensor::full(f32::NEG_INFINITY, (t_q, t_k), scores.device())?
+            .to_dtype(scores.dtype())?;
+        let additive = mask.where_cond(&zeros, &neg_inf)?;
+        scores = scores.broadcast_add(&additive)?;
+    }
+
+    let weights = softmax(&scores, D::Minus1)?;
+    weights.matmul(&v.contiguous()?)
+}
+
+/// SDPA attention with sliding window support. q, k, v are (B, H, T, D).
+fn sdpa_attention(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    window_size: (i64, i64),
+    enable_gqa: bool,
+) -> Result<Tensor> {
+    let t_q = q.dim(2)?;
+    let t_k = k.dim(2)?;
+    let window = window_size.0;
+
+    // Full context, same length
+    if (window < 0 || window >= t_q as i64) && t_q == t_k {
+        return scaled_dot_product_attention(q, k, v, None, true, enable_gqa);
+    }
+
+    // Single token generation
+    if t_q == 1 {
+        let (k, v) = if window >= 0 && (window as usize) < t_k {
+            // window is "left" tokens: we need to include (window + 1) keys total
+            let start = t_k.saturating_sub(window as usize + 1);
+            (k.narrow(2, start, t_k - start)?, v.narrow(2, start, t_k - start)?)
+        } else {
+            (k.clone(), v.clone())
+        };
+        return scaled_dot_product_attention(q, &k, &v, None, false, enable_gqa);
+    }
+
+    // Need explicit mask for sliding window/chunk inference
+    // For chunk inference (Tq != Tk), is_causal is not aligned to cache position
+    // => build an explicit bool mask
+    let device = q.device();
+    let row_idx = Tensor::arange((t_k - t_q) as i64, t_k as i64, device)?.unsqueeze(1)?;
+    let col_idx = Tensor::arange(0i64, t_k as i64, device)?.unsqueeze(0)?;
+    let mut mask = col_idx.broadcast_le(&row_idx)?;
+
+    // sliding window (left)
+    if window >= 0 && (window as usize) < t_k {
+        let dist = row_idx.broadcast_sub(&col_idx)?;
+        let window_t = Tensor::full(window, dist.shape(), device)?;
+        mask = mask.mul(&dist.le(&window_t)?.to_dtype(DType::U8)?)?;
+    }
+
+    scaled_dot_product_attention(q, k, v, Some(&mask), false, enable_gqa)
+}
+
+/// Flash Attention for training (no KV cache).
+///
+/// q, k, v: (B, T, H, D); window_size: (left, right) sliding window, -1 unlimited.
+/// Returns (B, T, H, D).
 pub fn flash_attn_func(
     q: &Tensor,
     k: &Tensor,
     v: &Tensor,
-    softmax_scale: Option<f32>,
-    causal: bool,
-    _window_size: Option<(usize, usize)>,
+    _causal: bool,
+    window_size: (i64, i64),
 ) -> Result<Tensor> {
-    let head_dim = q.dim(candle_core::D::Minus1)?;
-    let scale = softmax_scale.unwrap_or(1.0 / (head_dim as f32).sqrt());
-    
-    let q_t = q.transpose(1, 2)?;
-    let k_t = k.transpose(1, 2)?;
-    let v_t = v.transpose(1, 2)?;
-
-    let mask = if causal {
-        let seq_len = q.dim(1)?;
-        let arange = Tensor::arange(0u32, seq_len as u32, q.device())?;
-        let mask = arange.unsqueeze(0)?.broadcast_as((seq_len, seq_len))?
-            .gt(&arange.unsqueeze(1)?.broadcast_as((seq_len, seq_len))?)?
-            .to_dtype(DType::U8)?;
-        Some(mask)
-    } else {
-        None
-    };
-
-    let att = ops::sdpa(&q_t, &k_t, &v_t, mask.as_ref(), causal, scale, 0.0)?;
-    att.transpose(1, 2)
+    // SDPA fallback: transpose (B, T, H, D) -> (B, H, T, D)
+    let q = q.transpose(1, 2)?;
+    let k = k.transpose(1, 2)?;
+    let v = v.transpose(1, 2)?;
+    let enable_gqa = q.dim(1)? != k.dim(1)?;
+    let y = sdpa_attention(&q, &k, &v, window_size, enable_gqa)?;
+    y.transpose(1, 2) // back to (B, T, H, D)
 }
 
-/// KV cache entry for a single layer
-#[derive(Clone)]
-pub struct KVCacheEntry {
-    pub k: Tensor,
-    pub v: Tensor,
-}
-
-/// Flash attention with KV cache for inference.
+/// Flash Attention with KV cache for inference. Updates k_cache/v_cache of
+/// the given layer in-place, matching the FA3 behavior.
+///
+/// q: (B, T_new, H, D); k, v: new keys/values (B, T_new, H_kv, D).
+/// The current position is read from kv_cache.cache_seqlens.
 pub fn flash_attn_with_kvcache(
     q: &Tensor,
-    k_cache: &mut Tensor,
-    v_cache: &mut Tensor,
-    k_new: &Tensor,
-    v_new: &Tensor,
-    cache_seqlen: usize,
-    softmax_scale: Option<f32>,
-    causal: bool,
-    _window_size: Option<(usize, usize)>,
+    kv_cache: &KVCache,
+    layer_idx: usize,
+    k: &Tensor,
+    v: &Tensor,
+    _causal: bool,
+    window_size: (i64, i64),
 ) -> Result<Tensor> {
-    let head_dim = q.dim(candle_core::D::Minus1)?;
-    let scale = softmax_scale.unwrap_or(1.0 / (head_dim as f32).sqrt());
-    let new_seqlen = k_new.dim(1)?;
+    let t_new = q.dim(1)?;
+    let pos = kv_cache.get_pos(); // assume uniform position across batch
+    let (k_cache, v_cache) = kv_cache.get_layer_cache(layer_idx);
 
-    if new_seqlen > 0 {
-        k_cache.slice_set(k_new, 1, cache_seqlen)?;
-        v_cache.slice_set(v_new, 1, cache_seqlen)?;
-    }
+    // Insert new k, v into cache (in-place, matching FA3 behavior)
+    k_cache.slice_set(k, 1, pos)?;
+    v_cache.slice_set(v, 1, pos)?;
 
-    let total_seqlen = cache_seqlen + new_seqlen;
-    let k_used = k_cache.narrow(1, 0, total_seqlen)?;
-    let v_used = v_cache.narrow(1, 0, total_seqlen)?;
+    // Get full cache up to current position + new tokens
+    let end_pos = pos + t_new;
+    let k_full = k_cache.narrow(1, 0, end_pos)?;
+    let v_full = v_cache.narrow(1, 0, end_pos)?;
 
-    let q_t = q.transpose(1, 2)?;
-    let k_t = k_used.transpose(1, 2)?;
-    let v_t = v_used.transpose(1, 2)?;
+    // Transpose to SDPA layout: (B, T, H, D) -> (B, H, T, D)
+    let q_sdpa = q.transpose(1, 2)?;
+    let k_sdpa = k_full.transpose(1, 2)?;
+    let v_sdpa = v_full.transpose(1, 2)?;
 
-    let n_heads_q = q_t.dim(1)?;
-    let n_heads_kv = k_t.dim(1)?;
-    let (k_t, v_t) = if n_heads_q != n_heads_kv {
-        let n_rep = n_heads_q / n_heads_kv;
-        let k_rep = k_t.unsqueeze(2)?.expand(&[k_t.dim(0)?, n_heads_kv, n_rep, k_t.dim(2)?, k_t.dim(3)?])?
-            .reshape(&[k_t.dim(0)?, n_heads_q, k_t.dim(2)?, k_t.dim(3)?])?;
-        let v_rep = v_t.unsqueeze(2)?.expand(&[v_t.dim(0)?, n_heads_kv, n_rep, v_t.dim(2)?, v_t.dim(3)?])?
-            .reshape(&[v_t.dim(0)?, n_heads_q, v_t.dim(2)?, v_t.dim(3)?])?;
-        (k_rep, v_rep)
-    } else {
-        (k_t, v_t)
-    };
+    let enable_gqa = q_sdpa.dim(1)? != k_sdpa.dim(1)?;
+    let y_sdpa = sdpa_attention(&q_sdpa, &k_sdpa, &v_sdpa, window_size, enable_gqa)?;
 
-    let att = ops::sdpa(&q_t, &k_t, &v_t, None, causal, scale, 0.0)?;
-    att.transpose(1, 2)
+    y_sdpa.transpose(1, 2) // back to (B, T_new, H, D)
 }
