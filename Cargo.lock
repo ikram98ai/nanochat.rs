@@ -1238,6 +1238,7 @@ dependencies = [
  "parquet",
  "rand",
  "rand_distr",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",

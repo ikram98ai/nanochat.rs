@@ -119,6 +119,26 @@ impl PyRandom {
         r
     }
 
+    /// random.random(): float in [0, 1) with 53-bit resolution.
+    pub fn random(&mut self) -> f64 {
+        let a = (self.genrand_uint32() >> 5) as f64;
+        let b = (self.genrand_uint32() >> 6) as f64;
+        (a * 67108864.0 + b) * (1.0 / 9007199254740992.0)
+    }
+
+    /// random.choice(seq): a random element from a non-empty sequence.
+    pub fn choice<'a, T>(&mut self, seq: &'a [T]) -> &'a T {
+        &seq[self.randbelow(seq.len() as u64) as usize]
+    }
+
+    /// random.shuffle(x): shuffle in place.
+    pub fn shuffle<T>(&mut self, x: &mut [T]) {
+        for i in (1..x.len()).rev() {
+            let j = self.randbelow(i as u64 + 1) as usize;
+            x.swap(i, j);
+        }
+    }
+
     /// random.sample(population, k): chooses k unique random elements.
     pub fn sample<T: Copy>(&mut self, population: &[T], k: usize) -> Vec<T> {
         let n = population.len();

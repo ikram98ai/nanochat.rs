@@ -1,12 +1,15 @@
+pub mod chat_eval;
 pub mod checkpoint_manager;
 pub mod common;
 pub mod core_eval;
 pub mod dataloader;
 pub mod dataset;
 pub mod engine;
+pub mod execution;
 pub mod flash_attention;
 pub mod gpt;
 pub mod loss_eval;
 pub mod optim;
 pub mod pyrandom;
+pub mod tasks;
 pub mod tokenizer;
