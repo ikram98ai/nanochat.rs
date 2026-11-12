@@ -171,7 +171,8 @@ pub fn render_mc(question: &str, letters: &[String], choices: &[String]) -> Stri
     query
 }
 
-/// Rows of a JSONL snapshot file (one JSON object per line).
+/// Rows of a JSONL file (one JSON object per line), e.g. to build a task from
+/// local rows with its from_rows constructor.
 pub fn load_jsonl_rows(path: &std::path::Path) -> Result<Vec<Value>> {
     let data = std::fs::read_to_string(path)
         .map_err(|e| candle_core::Error::Msg(format!("Error reading {}: {e}", path.display())))?;
@@ -181,10 +182,4 @@ pub fn load_jsonl_rows(path: &std::path::Path) -> Result<Vec<Value>> {
             serde_json::from_str(line).map_err(|e| candle_core::Error::Msg(e.to_string()))
         })
         .collect()
-}
-
-/// Directory holding JSONL snapshots of the HuggingFace datasets, written by
-/// dev/export_hf_tasks.py (rows stored in the seed-42 shuffled order).
-pub fn hf_data_dir() -> std::path::PathBuf {
-    crate::nanochat::common::get_base_dir().join("hf_data")
 }

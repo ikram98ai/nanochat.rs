@@ -167,30 +167,25 @@ pub fn find_largest_model(checkpoints_dir: &Path) -> Result<String> {
     Ok(with_mtime[0].1.clone())
 }
 
-/// Look into checkpoint_dir and find the model checkpoint with the highest step.
-/// Note the max is taken over the step strings (zero-padded to equal width).
+/// Look into checkpoint_dir and find the model checkpoint (model_<step>.pt or
+/// model_<step>.safetensors) with the highest step.
 pub fn find_last_step(checkpoint_dir: &Path) -> Result<usize> {
-    let mut last_step_str: Option<String> = None;
+    let mut last_step: Option<usize> = None;
     for entry in std::fs::read_dir(checkpoint_dir)
         .map_err(|e| msg(format!("No checkpoints found in {}: {e}", checkpoint_dir.display())))?
         .flatten()
     {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if let Some(rest) = name.strip_prefix("model_") {
-            if !(name.ends_with(".pt") || name.ends_with(".safetensors")) {
-                continue;
-            }
-            let step_str = rest.split('.').next().unwrap_or_default().to_string();
-            if step_str.parse::<usize>().is_ok()
-                && last_step_str.as_deref().is_none_or(|prev| step_str.as_str() > prev)
-            {
-                last_step_str = Some(step_str);
-            }
+        let step = name
+            .strip_prefix("model_")
+            .and_then(|rest| rest.strip_suffix(".pt").or_else(|| rest.strip_suffix(".safetensors")))
+            .filter(|step_str| !step_str.is_empty() && step_str.chars().all(|c| c.is_ascii_digit()))
+            .and_then(|step_str| step_str.parse::<usize>().ok());
+        if let Some(step) = step {
+            last_step = Some(last_step.map_or(step, |prev| prev.max(step)));
         }
     }
-    let last_step_str = last_step_str
-        .ok_or_else(|| msg(format!("No checkpoints found in {}", checkpoint_dir.display())))?;
-    Ok(last_step_str.parse::<usize>().unwrap())
+    last_step.ok_or_else(|| msg(format!("No checkpoints found in {}", checkpoint_dir.display())))
 }
 
 /// Build a trainable model (VarMap-backed parameters) from a checkpoint.

@@ -1,3 +1,5 @@
 /target
 /nanochat-python
 .DS_Store
+/tests/data
+/models

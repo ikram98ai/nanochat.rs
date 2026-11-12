@@ -5,7 +5,8 @@
 use candle_core::Result;
 use serde_json::{json, Value};
 
-use super::common::{hf_data_dir, load_jsonl_rows, Slice, Task};
+use super::common::{Slice, Task};
+use super::hub::load_shuffled;
 
 /// smol-smoltalk dataset. train is 460K rows, test is 24K rows.
 pub struct SmolTalk {
@@ -16,8 +17,7 @@ pub struct SmolTalk {
 impl SmolTalk {
     pub fn new(split: &str, slice: Slice) -> Result<Self> {
         assert!(split == "train" || split == "test", "SmolTalk split must be train|test");
-        let path = hf_data_dir().join(format!("smoltalk_{split}.jsonl"));
-        let rows = load_jsonl_rows(&path)?;
+        let rows = load_shuffled("HuggingFaceTB/smol-smoltalk", "default", split)?;
         Ok(Self::from_rows(rows, slice))
     }
 

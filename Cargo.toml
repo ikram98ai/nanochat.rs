@@ -2,10 +2,12 @@
 name = "nanochat"
 version = "0.1.0"
 edition = "2021"
+# `cargo run --release` starts the chat CLI (src/main.rs)
+default-run = "nanochat"
 
 [dependencies]
-candle-core = { version = "0.9.2", features = ["accelerate"] }
-candle-nn = { version = "0.9.2", features = ["accelerate"] }
+candle-core = "0.9.2"
+candle-nn = "0.9.2"
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 rand = "0.9.0"
@@ -22,8 +24,18 @@ parquet = { version = "54", default-features = false, features = ["snap", "flate
 env_logger = "0.11.9"
 log = "0.4.29"
 
+# On macOS, CPU math goes through Apple's Accelerate framework. It does not exist
+# elsewhere, so other systems use candle's built-in CPU backend.
+[target.'cfg(target_os = "macos")'.dependencies]
+candle-core = { version = "0.9.2", features = ["accelerate"] }
+candle-nn = { version = "0.9.2", features = ["accelerate"] }
+
 [features]
 default = []
+# GPU backends (opt-in): `cargo run --release --features metal` on Apple Silicon,
+# `--features cuda` on NVIDIA. Without either, everything runs on the CPU.
+metal = ["candle-core/metal", "candle-nn/metal"]
+cuda = ["candle-core/cuda", "candle-nn/cuda"]
 
 [profile.release]
 debug = true

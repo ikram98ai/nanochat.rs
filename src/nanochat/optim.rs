@@ -2,8 +2,8 @@
 //! Usually the embeddings and scalars go into AdamW, and the matrix parameters go into Muon.
 //!
 //! Muon internally runs standard SGD-momentum, and then performs an orthogonalization
-//! post-processing step (Polar Express), followed by NorMuon variance reduction and a
-//! cautious weight-decay update.
+//! post-processing step (MuonEq row equilibration, Polar Express, Muon+ renormalization),
+//! followed by NorMuon variance reduction and a cautious weight-decay update.
 //!
 //! Muon should not be used for the embedding layer, the final fully connected layer,
 //! or any {0,1}-D parameters; those should all be optimized by AdamW.
@@ -155,9 +155,16 @@ fn muon_step(
     let momentum_buffer = lerp(momentum_buffer, stacked_grads, 1.0 - momentum)?;
     let g = lerp(stacked_grads, &momentum_buffer, momentum)?;
 
-    // Polar express (compute dtype is f32 on CPU; the bf16 fast path is CUDA-only)
-    let norm = g.sqr()?.sum_keepdim((1, 2))?.sqrt()?;
-    let mut x = g.broadcast_div(&((norm * 1.01)? + 1e-6)?)?;
+    // MuonEq row equilibration: rescale each row to the mean row norm so the spectrum
+    // entering orthogonalization is better conditioned (https://arxiv.org/abs/2603.28254)
+    let target = (g.sqr()?.sum_keepdim((1, 2))?.sqrt()? / (m as f64).sqrt())?;
+    let row_norm = g.sqr()?.sum_keepdim(2)?.sqrt()?.maximum(1e-6)?;
+    let x = g.broadcast_mul(&target.broadcast_div(&row_norm)?)?;
+
+    // Polar Express orthogonalization: replace each update with the nearest orthogonal
+    // matrix (compute dtype is f32 on CPU; the bf16 fast path is CUDA-only)
+    let norm = x.sqr()?.sum_keepdim((1, 2))?.sqrt()?;
+    let mut x = x.broadcast_div(&((norm * 1.01)? + 1e-6)?)?;
     if m > n {
         // Tall matrix
         for (a, b, c) in POLAR_EXPRESS_COEFFS.iter().take(ns_steps) {
@@ -175,7 +182,12 @@ fn muon_step(
             x = ((&x * *a)? + b_mat.matmul(&x)?)?;
         }
     }
-    let g = x;
+    // Muon+ renormalization: snap the Frobenius norm to sqrt(min(m, n)), the norm of an
+    // exactly semi-orthogonal matrix, correcting for under-convergence of the polar
+    // iteration (https://arxiv.org/abs/2602.21545)
+    let target_norm = (m.min(n) as f64).sqrt();
+    let current_norm = x.sqr()?.sum_keepdim((1, 2))?.sqrt()?.maximum(1e-6)?;
+    let g = x.broadcast_mul(&(current_norm.recip()? * target_norm)?)?;
 
     // Variance reduction
     let v_mean = g.sqr()?.mean_keepdim(red_dim)?;

@@ -519,10 +519,17 @@ pub fn sample_next_token(
         match top_k {
             Some(top_k) if top_k > 0 => {
                 let k = top_k.min(row.len());
-                // top-k indices, ties resolved to the lower index (stable sort)
+                // top-k indices in descending logit order, ties resolved to the lower
+                // index: partition out the k largest first so only those get sorted
                 let mut idx: Vec<usize> = (0..row.len()).collect();
-                idx.sort_by(|&a, &b| row[b].partial_cmp(&row[a]).unwrap());
-                let vals: Vec<f32> = idx[..k].iter().map(|&i| row[i] / temperature as f32).collect();
+                let by_logit_desc =
+                    |a: &usize, b: &usize| row[*b].total_cmp(&row[*a]).then(a.cmp(b));
+                if k < idx.len() {
+                    idx.select_nth_unstable_by(k - 1, by_logit_desc);
+                    idx.truncate(k);
+                }
+                idx.sort_unstable_by(by_logit_desc);
+                let vals: Vec<f32> = idx.iter().map(|&i| row[i] / temperature as f32).collect();
                 let probs = softmax_1d(&vals);
                 let choice = multinomial(&probs, rng) as usize;
                 out.push(idx[choice] as u32);

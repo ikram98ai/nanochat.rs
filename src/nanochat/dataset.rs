@@ -104,6 +104,9 @@ pub fn parquets_iter_batched(
 ) -> Result<impl Iterator<Item = Result<Vec<String>>>> {
     assert!(split == "train" || split == "val", "split must be 'train' or 'val'");
     let paths = list_parquet_files(None, false)?;
+    if paths.is_empty() {
+        return Err(msg("No dataset parquet files found: download the shards first (make data)"));
+    }
     let paths: Vec<PathBuf> = if split == "train" {
         paths[..paths.len() - 1].to_vec()
     } else {
@@ -133,17 +136,34 @@ pub fn download_single_file(index: usize) -> bool {
     let url = format!("{BASE_URL}/{filename}");
     println!("Downloading {filename}...");
 
-    let max_attempts = 5;
+    // Write to a temporary file first, then move it to the final location. A
+    // failed attempt keeps what it got, and the next one resumes from there, so
+    // a connection that keeps dropping still makes progress.
+    let temp_path = filepath.with_extension("parquet.tmp");
+    let max_attempts = 10;
     for attempt in 1..=max_attempts {
         let result = (|| -> anyhow::Result<()> {
             let client = reqwest::blocking::Client::builder()
                 .timeout(std::time::Duration::from_secs(30 * 60))
                 .connect_timeout(std::time::Duration::from_secs(30))
                 .build()?;
-            let mut response = client.get(&url).send()?.error_for_status()?;
-            // Write to temporary file first, then move to the final location
-            let temp_path = filepath.with_extension("parquet.tmp");
-            let mut f = File::create(&temp_path)?;
+            let have = std::fs::metadata(&temp_path).map(|m| m.len()).unwrap_or(0);
+            let mut request = client.get(&url);
+            if have > 0 {
+                request = request.header(reqwest::header::RANGE, format!("bytes={have}-"));
+            }
+            let response = request.send()?;
+            if response.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+                // the partial file does not match the remote one: start over
+                std::fs::remove_file(&temp_path)?;
+                anyhow::bail!("cannot resume, restarting the download");
+            }
+            let mut response = response.error_for_status()?;
+            let mut f = if response.status() == reqwest::StatusCode::PARTIAL_CONTENT {
+                std::fs::OpenOptions::new().append(true).open(&temp_path)?
+            } else {
+                File::create(&temp_path)? // the server sent the whole file
+            };
             std::io::copy(&mut response, &mut f)?;
             std::fs::rename(&temp_path, &filepath)?;
             Ok(())
@@ -155,12 +175,9 @@ pub fn download_single_file(index: usize) -> bool {
             }
             Err(e) => {
                 println!("Attempt {attempt}/{max_attempts} failed for {filename}: {e}");
-                // Clean up any partial files
-                let _ = std::fs::remove_file(filepath.with_extension("parquet.tmp"));
-                let _ = std::fs::remove_file(&filepath);
                 if attempt < max_attempts {
-                    // exponential backoff: 2^attempt seconds
-                    let wait = 1u64 << attempt;
+                    // exponential backoff: 2^attempt seconds, at most 30
+                    let wait = (1u64 << attempt).min(30);
                     println!("Waiting {wait} seconds before retry...");
                     std::thread::sleep(std::time::Duration::from_secs(wait));
                 } else {

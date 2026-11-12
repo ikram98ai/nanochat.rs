@@ -1,12 +1,19 @@
-//! Parity tests for the BPE tokenizer against the tiny tokenizer trained and
-//! exported by the Python implementation (tests/gen_reference.py).
+//! Tests for the BPE tokenizer against the tiny trained tokenizer and the
+//! expected encodings in tests/data (tokenizer.json, tokenizer_fixtures.json).
+//!
+//! tests/data is generated, not checked in: `cargo run --release --example
+//! gen_test_data` rebuilds it from this implementation, so these tests detect
+//! behaviour changes since it was generated. The Python reference's fixture
+//! scripts write the same layout, which turns them into parity tests.
 
 use std::path::PathBuf;
 
 use nanochat::tokenizer::{Tokenizer, SPECIAL_TOKENS};
 
 fn data_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests").join("data")
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests").join("data");
+    assert!(dir.join("meta.json").exists(), "tests/data is generated, not checked in: run `cargo run --release --example gen_test_data` first");
+    dir
 }
 
 fn load_tokenizer() -> Tokenizer {
@@ -149,4 +156,38 @@ fn test_save_load_roundtrip() {
     let text = "Hello world, this is a round-trip test! 1234";
     assert_eq!(tok.encode(text, None, None), tok2.encode(text, None, None));
     assert_eq!(tok.get_vocab_size(), tok2.get_vocab_size());
+}
+
+/// The reference's tokenizer.pkl and a HuggingFace-format tokenizer.json of the
+/// same tokenizer load directly and behave identically to the native format.
+#[test]
+fn test_foreign_tokenizer_formats() {
+    let native = load_tokenizer();
+    let fx = load_fixtures();
+    for format in ["pkl", "hf"] {
+        let dir = data_dir().join("tokenizer_formats").join(format);
+        let tokenizer = Tokenizer::from_directory(&dir).unwrap();
+        assert_eq!(tokenizer.get_vocab_size(), native.get_vocab_size(), "{format}: vocab size");
+        assert_eq!(tokenizer.get_bos_token_id(), native.get_bos_token_id(), "{format}: bos");
+        assert_eq!(tokenizer.token_bytes(), native.token_bytes(), "{format}: token bytes");
+        let mut specials = tokenizer.get_special_tokens();
+        specials.sort();
+        let mut native_specials = native.get_special_tokens();
+        native_specials.sort();
+        assert_eq!(specials, native_specials, "{format}: special tokens");
+        for name in &specials {
+            assert_eq!(tokenizer.encode_special(name), native.encode_special(name), "{format}: {name}");
+        }
+        for id in 0..native.get_vocab_size() as u32 {
+            assert_eq!(
+                tokenizer.decode_single_token_bytes(id),
+                native.decode_single_token_bytes(id),
+                "{format}: bytes of token {id}"
+            );
+        }
+        for case in fx["encode_cases"].as_array().unwrap() {
+            let text = case["text"].as_str().unwrap();
+            assert_eq!(tokenizer.encode(text, None, None), as_u32s(&case["ids"]), "{format}: encode {text:?}");
+        }
+    }
 }

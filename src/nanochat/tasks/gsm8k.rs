@@ -7,7 +7,8 @@
 use candle_core::Result;
 use serde_json::{json, Value};
 
-use super::common::{hf_data_dir, load_jsonl_rows, Slice, Task};
+use super::common::{Slice, Task};
+use super::hub::load_shuffled;
 
 /// Extract the numerical answer after the #### marker, with the official
 /// normalization (strip + remove commas).
@@ -49,8 +50,7 @@ impl GSM8K {
     pub fn new(subset: &str, split: &str, slice: Slice) -> Result<Self> {
         assert!(subset == "main" || subset == "socratic", "GSM8K subset must be main|socratic");
         assert!(split == "train" || split == "test", "GSM8K split must be train|test");
-        let path = hf_data_dir().join(format!("gsm8k_{subset}_{split}.jsonl"));
-        let rows = load_jsonl_rows(&path)?;
+        let rows = load_shuffled("openai/gsm8k", subset, split)?;
         Ok(Self::from_rows(rows, slice))
     }
 

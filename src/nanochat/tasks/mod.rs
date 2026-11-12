@@ -2,6 +2,7 @@ pub mod arc;
 pub mod common;
 pub mod customjson;
 pub mod gsm8k;
+pub mod hub;
 pub mod humaneval;
 pub mod mmlu;
 pub mod smoltalk;

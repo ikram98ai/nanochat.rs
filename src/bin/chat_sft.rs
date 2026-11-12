@@ -20,16 +20,14 @@ use nanochat::engine::Engine;
 use nanochat::loss_eval::evaluate_bpb;
 use nanochat::optim::GroupKind;
 use nanochat::tasks::common::{Slice, Task, TaskMixture};
-use nanochat::tasks::customjson::CustomJSON;
 use nanochat::tasks::gsm8k::GSM8K;
 use nanochat::tasks::mmlu::MMLU;
 use nanochat::tasks::smoltalk::SmolTalk;
-use nanochat::tasks::spellingbee::{SimpleSpelling, SpellingBee};
 
 #[derive(Parser, Debug, Clone, serde::Serialize)]
 #[command(about = "Supervised fine-tuning (SFT) the model")]
 struct Args {
-    /// device type: cpu (empty = autodetect)
+    /// device type: cuda|cpu|mps (empty = autodetect)
     #[arg(long, default_value = "")]
     device_type: String,
     /// model tag to load from
@@ -201,20 +199,17 @@ fn main() -> anyhow::Result<()> {
     }
 
     // SFT data mixture
-    let identity_conversations_filepath = base_dir.join("identity_conversations.jsonl");
     let mut train_tasks: Vec<Box<dyn Task>> = vec![
-        Box::new(SmolTalk::new("train", Slice::default())?), // general conversations
-        Box::new(CustomJSON::new(&identity_conversations_filepath, Slice::default())?),
-        Box::new(CustomJSON::new(&identity_conversations_filepath, Slice::default())?), // 2 epochs
+        Box::new(SmolTalk::new("train", Slice::default())?), // 460K rows of general conversations
     ];
     for _ in 0..args.mmlu_epochs {
+        // 100K rows per epoch
         train_tasks.push(Box::new(MMLU::new("all", "auxiliary_train", Slice::default())?));
     }
     for _ in 0..args.gsm8k_epochs {
+        // 8K rows per epoch
         train_tasks.push(Box::new(GSM8K::new("main", "train", Slice::default())?));
     }
-    train_tasks.push(Box::new(SimpleSpelling::new(200000, "train", Slice::default())?));
-    train_tasks.push(Box::new(SpellingBee::new(80000, "train", Slice::default())?));
     let train_dataset = TaskMixture::new(train_tasks);
     print0(&format!(
         "Training mixture: {} rows (MMLU x{}, GSM8K x{})",
@@ -285,7 +280,7 @@ fn main() -> anyhow::Result<()> {
             && (last_step || (step > 0 && step % args.chatcore_every as usize == 0))
         {
             let engine = Engine::new(&model, &tokenizer);
-            let all_tasks = ["ARC-Easy", "ARC-Challenge", "MMLU", "GSM8K", "HumanEval", "SpellingBee"];
+            let all_tasks = ["ARC-Easy", "ARC-Challenge", "MMLU", "GSM8K", "HumanEval"];
             let categorical_tasks = ["ARC-Easy", "ARC-Challenge", "MMLU"];
             let mut task_results: HashMap<&str, f64> = HashMap::new();
             for task_name in all_tasks {

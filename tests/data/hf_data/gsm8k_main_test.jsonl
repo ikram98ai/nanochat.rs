@@ -1,4 +1,0 @@
-{"question": "Weng earns $12 an hour. She did 50 minutes. How much?", "answer": "Weng earns 12/60 = $<<12/60=0.2>>0.2 per minute.\nWorking 50 minutes, she earned 0.2 x 50 = $<<0.2*50=10>>10.\n#### 10"}
-{"question": "Two plus two?", "answer": "<<2+2=4>>4 indeed <<4*1=4>><<1+1=2>>\n#### 4"}
-{"question": "No tools here?", "answer": "Just thinking.\n#### 1,234"}
-{"question": "No equals sign?", "answer": "Look: <<weird>> ok\n#### -5.5"}

@@ -68,8 +68,9 @@ fn main() -> anyhow::Result<()> {
         load_model(&args.source, &device, "eval", args.model_tag.as_deref(), args.step)?;
     let engine = Engine::new(&model, &tokenizer);
 
-    // Get the tasks to evaluate on
-    let all_tasks = ["ARC-Easy", "ARC-Challenge", "MMLU", "GSM8K", "HumanEval", "SpellingBee"];
+    // Get the tasks to evaluate on (SpellingBee is not part of ChatCORE, but can
+    // still be evaluated explicitly with -a SpellingBee)
+    let all_tasks = ["ARC-Easy", "ARC-Challenge", "MMLU", "GSM8K", "HumanEval"];
     // multiple choice 1 of 4 => 25%, open-ended => 0%
     let baseline_accuracies = |task: &str| match task {
         "ARC-Easy" | "ARC-Challenge" | "MMLU" => 0.25,

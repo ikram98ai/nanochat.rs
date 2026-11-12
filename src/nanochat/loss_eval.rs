@@ -1,6 +1,6 @@
 //! A number of functions that help with evaluating a base model.
 
-use candle_core::{DType, Result, Tensor};
+use candle_core::{DType, Device, Result, Tensor};
 
 use super::gpt::GPT;
 
@@ -20,6 +20,9 @@ pub fn evaluate_bpb(
     steps: usize,
     token_bytes: &Tensor,
 ) -> Result<f64> {
+    // byte length of each token id, pulled to the host once
+    let token_bytes: Vec<i64> =
+        token_bytes.to_device(&Device::Cpu)?.to_dtype(DType::I64)?.to_vec1()?;
     let mut total_nats = 0f64;
     let mut total_bytes = 0i64;
     for _ in 0..steps {
@@ -27,24 +30,16 @@ pub fn evaluate_bpb(
             .next()
             .ok_or_else(|| candle_core::Error::Msg("batch iterator exhausted".into()))??;
         let loss2d = model.forward(&x, Some(&y), None, "none")?; // flat (B*T,)
-        let y = y.reshape(((),))?.to_dtype(DType::I64)?;
-        let y_vec = y.to_vec1::<i64>()?;
-        let num_bytes2d = if y_vec.iter().any(|&t| t < 0) {
-            // any target token < 0 is to be ignored: do NOT index token_bytes with negatives
-            let valid = y.ge(0i64)?;
-            let zeros = y.zeros_like()?;
-            let y_safe = valid.where_cond(&y, &zeros)?;
-            // map valid targets to their byte length; ignored targets contribute 0 bytes
-            let gathered = token_bytes.to_dtype(DType::I64)?.gather(&y_safe, 0)?;
-            valid.where_cond(&gathered, &zeros)?
-        } else {
-            // fast path: no ignored targets, safe to index directly
-            token_bytes.to_dtype(DType::I64)?.gather(&y, 0)?
-        };
+        let y = y.flatten_all()?.to_dtype(DType::I64)?.to_vec1::<i64>()?;
+        // map valid targets to their byte length; any target token < 0 is to be
+        // ignored (do NOT index token_bytes with negatives) and contributes 0 bytes
+        let num_bytes: Vec<i64> =
+            y.iter().map(|&t| if t < 0 { 0 } else { token_bytes[t as usize] }).collect();
         // tokens with 0 bytes (special or ignored) contribute zero loss
-        let byte_mask = num_bytes2d.gt(0i64)?.to_dtype(DType::F32)?;
+        let byte_mask: Vec<f32> = num_bytes.iter().map(|&b| (b > 0) as u8 as f32).collect();
+        let byte_mask = Tensor::from_vec(byte_mask, num_bytes.len(), loss2d.device())?;
         total_nats += loss2d.mul(&byte_mask)?.sum_all()?.to_scalar::<f32>()? as f64;
-        total_bytes += num_bytes2d.sum_all()?.to_scalar::<i64>()?;
+        total_bytes += num_bytes.iter().sum::<i64>();
     }
     if total_bytes == 0 {
         return Ok(f64::INFINITY);

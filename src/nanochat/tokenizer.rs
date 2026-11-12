@@ -2,8 +2,10 @@
 //!
 //! Byte-pair encoding over a learned merge table with a GPT-4-style split
 //! pattern, equivalent to the tiktoken encoding used for inference by the
-//! Python version. Training the tokenizer happens in Python; this loads the
-//! exported {pattern, mergeable_ranks, special_tokens} as JSON.
+//! Python version. The tokenizer is stored as {pattern, mergeable_ranks,
+//! special_tokens} JSON (written by tok_train); the Python reference's
+//! tokenizer.pkl and HuggingFace-format tokenizer.json files are read directly
+//! as well (see tokenizer_import).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -14,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::common::get_base_dir;
+use super::tokenizer_import;
 
 pub const SPECIAL_TOKENS: [&str; 9] = [
     // every document begins with the Beginning of Sequence (BOS) token that delimits documents
@@ -107,7 +110,8 @@ struct RankEntry {
 struct TokenizerFile {
     pattern: String,
     mergeable_ranks: Vec<RankEntry>,
-    special_tokens: HashMap<String, u32>,
+    /// (sorted, so that saving the same tokenizer always writes the same file)
+    special_tokens: std::collections::BTreeMap<String, u32>,
 }
 
 pub struct Tokenizer {
@@ -146,17 +150,43 @@ impl Tokenizer {
         })
     }
 
+    /// Load the tokenizer of a checkpoint directory. Reads, in order of preference:
+    /// - tokenizer.json in this port's format (as written by tok_train),
+    /// - tokenizer.json in the HuggingFace tokenizers format (HF-format nanochat repos),
+    /// - tokenizer.pkl, the Python reference's pickled tiktoken Encoding.
     pub fn from_directory(tokenizer_dir: &Path) -> Result<Self> {
-        let path = tokenizer_dir.join("tokenizer.json");
-        let data = std::fs::read_to_string(&path)
-            .map_err(|e| msg(format!("Error reading {}: {e}", path.display())))?;
-        let file: TokenizerFile = serde_json::from_str(&data).map_err(msg)?;
-        let mut mergeable_ranks = HashMap::new();
-        for entry in &file.mergeable_ranks {
-            let bytes = base64::engine::general_purpose::STANDARD.decode(&entry.bytes).map_err(msg)?;
-            mergeable_ranks.insert(bytes, entry.rank);
-        }
-        Self::new(&file.pattern, mergeable_ranks, file.special_tokens, "<|bos|>")
+        let json_path = tokenizer_dir.join("tokenizer.json");
+        let pickle_path = tokenizer_dir.join("tokenizer.pkl");
+        let (pattern, mergeable_ranks, special_tokens) = if json_path.exists() {
+            let data = std::fs::read_to_string(&json_path)
+                .map_err(|e| msg(format!("Error reading {}: {e}", json_path.display())))?;
+            let value: Value = serde_json::from_str(&data).map_err(msg)?;
+            if value.get("mergeable_ranks").is_some() {
+                let file: TokenizerFile = serde_json::from_value(value).map_err(msg)?;
+                let mut mergeable_ranks = HashMap::new();
+                for entry in &file.mergeable_ranks {
+                    let bytes = base64::engine::general_purpose::STANDARD.decode(&entry.bytes).map_err(msg)?;
+                    mergeable_ranks.insert(bytes, entry.rank);
+                }
+                (file.pattern, mergeable_ranks, file.special_tokens.into_iter().collect())
+            } else {
+                let parts = tokenizer_import::from_hf_json(&value)?;
+                tokenizer_import::validate(&parts)?;
+                parts
+            }
+        } else if pickle_path.exists() {
+            let data = std::fs::read(&pickle_path)
+                .map_err(|e| msg(format!("Error reading {}: {e}", pickle_path.display())))?;
+            let parts = tokenizer_import::from_tiktoken_pickle(&data)?;
+            tokenizer_import::validate(&parts)?;
+            parts
+        } else {
+            return Err(msg(format!(
+                "No tokenizer.json or tokenizer.pkl found in {}",
+                tokenizer_dir.display()
+            )));
+        };
+        Self::new(&pattern, mergeable_ranks, special_tokens, "<|bos|>")
     }
 
     pub fn save(&self, tokenizer_dir: &Path) -> Result<()> {
@@ -173,7 +203,7 @@ impl Tokenizer {
                     rank: *rank,
                 })
                 .collect(),
-            special_tokens: self.special_tokens.clone(),
+            special_tokens: self.special_tokens.iter().map(|(name, id)| (name.clone(), *id)).collect(),
         };
         std::fs::write(&path, serde_json::to_string(&file).map_err(msg)?).map_err(msg)?;
         println!("Saved tokenizer to {}", path.display());
@@ -230,6 +260,34 @@ impl Tokenizer {
 
     pub fn encode_batch(&self, texts: &[&str]) -> Vec<Vec<u32>> {
         texts.iter().map(|t| self.encode_ordinary(t)).collect()
+    }
+
+    /// Encode a batch of texts on up to num_threads threads (the equivalent of
+    /// tiktoken's encode_ordinary_batch). The output order matches the input.
+    pub fn encode_batch_threaded<S: AsRef<str> + Sync>(
+        &self,
+        texts: &[S],
+        num_threads: usize,
+    ) -> Vec<Vec<u32>> {
+        let num_threads = num_threads.clamp(1, texts.len().max(1));
+        if num_threads == 1 {
+            return texts.iter().map(|t| self.encode_ordinary(t.as_ref())).collect();
+        }
+        let chunk_size = texts.len().div_ceil(num_threads);
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = texts
+                .chunks(chunk_size)
+                .map(|chunk| {
+                    scope.spawn(move || {
+                        chunk.iter().map(|t| self.encode_ordinary(t.as_ref())).collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|h| h.join().expect("tokenizer thread panicked"))
+                .collect()
+        })
     }
 
     pub fn decode(&self, ids: &[u32]) -> String {
@@ -500,15 +558,22 @@ impl Tokenizer {
         Tokenizer::new(SPLIT_PATTERN, mergeable_ranks, special_tokens, "<|bos|>")
     }
 
-    /// Byte length of each token id's decoded string (0 for special tokens),
-    /// as used by the bits-per-byte evaluation.
+    /// Raw bytes of a single (non-special) token.
+    pub fn decode_single_token_bytes(&self, id: u32) -> Option<&[u8]> {
+        self.decoder.get(&id).map(|b| b.as_slice())
+    }
+
+    /// Number of bytes of each token id (0 for special tokens), as used by the
+    /// bits-per-byte evaluation. Uses the raw bytes of the token: decoding to a
+    /// string first corrupts tokens that are not valid standalone UTF-8
+    /// (e.g. the raw bytes >= 0x80).
     pub fn token_bytes(&self) -> Vec<i32> {
         (0..self.get_vocab_size() as u32)
             .map(|id| {
                 if self.special_tokens_decoder.contains_key(&id) {
-                    0 // special characters are not counted
+                    0 // special tokens are not counted
                 } else {
-                    self.decode(&[id]).len() as i32
+                    self.decode_single_token_bytes(id).map_or(0, |b| b.len() as i32)
                 }
             })
             .collect()

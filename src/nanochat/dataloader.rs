@@ -150,6 +150,8 @@ pub struct DataLoader<'a> {
     bos_token: u32,
     doc_buffer: Vec<Vec<u32>>,
     state: LoaderState,
+    /// number of threads used to tokenize each batch of documents
+    pub tokenizer_threads: usize,
 }
 
 impl<'a> DataLoader<'a> {
@@ -178,15 +180,19 @@ impl<'a> DataLoader<'a> {
             bos_token,
             doc_buffer: Vec::new(),
             state: LoaderState { pq_idx: 0, rg_idx: 0, epoch: 1 },
+            tokenizer_threads: 4,
         })
     }
 
     fn refill_buffer(&mut self) -> Result<()> {
         let (doc_batch, state) = self.batches.next_batch()?;
         self.state = state;
-        for doc in &doc_batch {
-            let mut tokens = vec![self.bos_token];
-            tokens.extend(self.tokenizer.encode_ordinary(doc));
+        // tokenize the batch of documents in parallel, prepending BOS to each
+        let token_lists = self.tokenizer.encode_batch_threaded(&doc_batch, self.tokenizer_threads);
+        for ids in token_lists {
+            let mut tokens = Vec::with_capacity(ids.len() + 1);
+            tokens.push(self.bos_token);
+            tokens.extend(ids);
             self.doc_buffer.push(tokens);
         }
         Ok(())
@@ -323,7 +329,13 @@ impl<'a> SftDataLoader<'a> {
         let dataset_size = self.dataset.len();
         while self.conv_buffer.len() < self.buffer_size {
             let conversation = self.dataset.get(self.cursor)?;
-            let (ids, mask) = self.tokenizer.render_conversation(&conversation, 2048)?;
+            // Truncate to at most one row. The reference always truncates to 2048
+            // tokens, which fits its default rows of 2049; with a shorter context a
+            // longer conversation could never be packed, would stay in the buffer
+            // forever and, once the buffer was full of them, every batch would be
+            // all padding.
+            let max_tokens = 2048.min(self.seq_len + 1);
+            let (ids, mask) = self.tokenizer.render_conversation(&conversation, max_tokens)?;
             self.conv_buffer.push((ids, mask));
             self.cursor += 1;
             if self.cursor >= dataset_size {

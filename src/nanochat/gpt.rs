@@ -473,10 +473,6 @@ impl GPT {
     /// 12 * h * q * effective_seq_len accounts for key @ query matmul flops inside
     /// attention; with sliding windows, effective_seq_len varies per layer.
     pub fn estimate_flops(&self) -> usize {
-        let (wte, value_embeds, lm_head, transformer_matrices, scalars) = self.param_counts();
-        let nparams = wte + value_embeds + lm_head + transformer_matrices + scalars;
-        // Exclude non-matmul params: embeddings and per-layer scalars
-        let nparams_exclude = wte + value_embeds + scalars;
         let h = self.config.n_head;
         let q = self.config.n_embd / self.config.n_head;
         let t = self.config.sequence_len;
@@ -487,7 +483,61 @@ impl GPT {
             let effective_seq = if window < 0 { t } else { (window as usize).min(t) };
             attn_flops += 12 * h * q * effective_seq;
         }
-        6 * (nparams - nparams_exclude) + attn_flops
+        6 * self.num_matmul_params() + attn_flops
+    }
+
+    /// The number of parameters that participate in matmuls with the token stream,
+    /// i.e. contribute 2 FLOPs/param to the forward pass: every Linear layer
+    /// (transformer matrices incl. the ve gates, lm_head, smear_gate). Embeddings
+    /// are lookups and the per-layer scalars are not matmuls.
+    pub fn num_matmul_params(&self) -> usize {
+        let (_wte, _value_embeds, lm_head, transformer_matrices, _scalars) = self.param_counts();
+        transformer_matrices + lm_head + self.smear_gate.weight().elem_count()
+    }
+
+    /// Left attention window of each layer, in tokens.
+    fn windows(&self) -> impl Iterator<Item = usize> + '_ {
+        let t = self.config.sequence_len;
+        self.window_sizes.iter().map(move |w| if w.0 < 0 { t } else { w.0 as usize })
+    }
+
+    /// Forward FLOPs to decode one token at a given context length during inference:
+    /// 2 FLOPs per matmul param, plus attention over min(context, window) per layer.
+    pub fn estimate_decode_flops(&self, context_len: usize) -> usize {
+        let h = self.config.n_head;
+        let q = self.config.n_embd / self.config.n_head;
+        let attn_flops: usize = self.windows().map(|window| 4 * h * q * context_len.min(window)).sum();
+        2 * self.num_matmul_params() + attn_flops
+    }
+
+    /// Forward FLOPs to prefill a prompt: causal, so token t attends to min(t, window).
+    pub fn estimate_prefill_flops(&self, num_tokens: usize) -> usize {
+        let h = self.config.n_head;
+        let q = self.config.n_embd / self.config.n_head;
+        let mut attn_flops = 0usize;
+        for window in self.windows() {
+            let w = window.min(num_tokens);
+            let attended_tokens = w * (w + 1) / 2 + (num_tokens - w) * w; // ramp up to w, then flat
+            attn_flops += 4 * h * q * attended_tokens;
+        }
+        2 * self.num_matmul_params() * num_tokens + attn_flops
+    }
+
+    /// Bytes to *store* one token of KV cache during inference, per row (all layers).
+    pub fn kv_bytes_per_token(&self) -> usize {
+        let head_dim = self.config.n_embd / self.config.n_head;
+        let kv_dtype_bytes = DType::F32.size_in_bytes(); // the KV cache is kept in the compute dtype
+        self.config.n_layer * 2 * self.config.n_kv_head * head_dim * kv_dtype_bytes
+    }
+
+    /// Bytes of KV cache *read* by one decode step at a given context length, per row.
+    /// Sliding window layers only attend to (and read) the last `window` tokens.
+    pub fn kv_read_bytes(&self, context_len: usize) -> usize {
+        let head_dim = self.config.n_embd / self.config.n_head;
+        let kv_dtype_bytes = DType::F32.size_in_bytes();
+        self.windows()
+            .map(|window| 2 * self.config.n_kv_head * head_dim * kv_dtype_bytes * context_len.min(window))
+            .sum()
     }
 
     /// Return detailed parameter counts for scaling law analysis.
@@ -704,8 +754,8 @@ impl GPT {
                     // mask out everything below the k-th largest logit
                     let k = top_k.min(logits.len());
                     let mut sorted = logits.clone();
-                    sorted.sort_by(|a, b| b.partial_cmp(a).unwrap());
-                    let kth = sorted[k - 1];
+                    let (_, kth, _) = sorted.select_nth_unstable_by(k - 1, |a, b| b.total_cmp(a));
+                    let kth = *kth;
                     for v in logits.iter_mut() {
                         if *v < kth {
                             *v = f32::NEG_INFINITY;

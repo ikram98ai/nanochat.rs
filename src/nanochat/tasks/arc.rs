@@ -4,7 +4,8 @@
 use candle_core::Result;
 use serde_json::{json, Value};
 
-use super::common::{hf_data_dir, load_jsonl_rows, render_mc, Slice, Task};
+use super::common::{render_mc, Slice, Task};
+use super::hub::load_shuffled;
 
 pub struct ARC {
     slice: Slice,
@@ -21,8 +22,7 @@ impl ARC {
             ["train", "validation", "test"].contains(&split),
             "ARC split must be train|validation|test"
         );
-        let path = hf_data_dir().join(format!("arc_{subset}_{split}.jsonl"));
-        let rows = load_jsonl_rows(&path)?;
+        let rows = load_shuffled("allenai/ai2_arc", subset, split)?;
         Ok(Self::from_rows(rows, slice))
     }
 

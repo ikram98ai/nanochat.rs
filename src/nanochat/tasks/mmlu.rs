@@ -4,7 +4,8 @@
 use candle_core::Result;
 use serde_json::{json, Value};
 
-use super::common::{hf_data_dir, load_jsonl_rows, render_mc, Slice, Task};
+use super::common::{render_mc, Slice, Task};
+use super::hub::load_shuffled;
 
 pub const LETTERS: [&str; 4] = ["A", "B", "C", "D"];
 
@@ -20,8 +21,7 @@ impl MMLU {
             ["auxiliary_train", "validation", "dev", "test"].contains(&split),
             "split {split} must be auxiliary_train|validation|dev|test"
         );
-        let path = hf_data_dir().join(format!("mmlu_{subset}_{split}.jsonl"));
-        let rows = load_jsonl_rows(&path)?;
+        let rows = load_shuffled("cais/mmlu", subset, split)?;
         Ok(Self::from_rows(rows, slice))
     }
 

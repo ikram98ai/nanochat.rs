@@ -1,7 +1,8 @@
 //! Train the base model. From the root directory of the project, run as:
 //!
 //!     cargo run --release --bin base_train -- --depth=4 --max-seq-len=512 \
-//!         --device-batch-size=1 --eval-tokens=512 --total-batch-size=512 --num-iterations=20
+//!         --device-batch-size=1 --eval-tokens=512 --core-metric-every=-1 \
+//!         --total-batch-size=512 --num-iterations=20
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -11,7 +12,8 @@ use candle_nn::{VarBuilder, VarMap};
 use clap::Parser;
 use serde_json::json;
 
-use nanochat::checkpoint_manager::save_checkpoint;
+use nanochat::base_eval::evaluate_core;
+use nanochat::checkpoint_manager::{load_checkpoint, load_optimizer_state, save_checkpoint};
 use nanochat::common::{autodetect_device_type, compute_init, get_base_dir, print0, print_banner, setup_default_logging};
 use nanochat::dataloader::{DataLoader, LoaderState};
 use nanochat::engine::Engine;
@@ -23,7 +25,7 @@ use nanochat::tokenizer::get_tokenizer;
 #[derive(Parser, Debug, Clone, serde::Serialize)]
 #[command(about = "Pretrain base model")]
 struct Args {
-    /// device type: cpu (empty = autodetect)
+    /// device type: cuda|cpu|mps (empty = autodetect)
     #[arg(long, default_value = "")]
     device_type: String,
     // Model architecture
@@ -83,6 +85,9 @@ struct Args {
     /// final LR as fraction of initial LR
     #[arg(long, default_value_t = 0.05)]
     final_lr_frac: f64,
+    /// resume training from this step (-1 = disable)
+    #[arg(long, default_value_t = -1)]
+    resume_from_step: i64,
     // Evaluation
     /// evaluate val bpb every N steps (-1 = disable)
     #[arg(long, default_value_t = 250)]
@@ -90,6 +95,12 @@ struct Args {
     /// number of tokens to evaluate val loss on
     #[arg(long, default_value_t = 80 * 524288)]
     eval_tokens: usize,
+    /// evaluate CORE metric every N steps (-1 = disable)
+    #[arg(long, default_value_t = 2000)]
+    core_metric_every: i64,
+    /// examples per task for CORE metric
+    #[arg(long, default_value_t = 500)]
+    core_metric_max_per_task: i64,
     /// sample from model every N steps (-1 = disable)
     #[arg(long, default_value_t = 2000)]
     sample_every: i64,
@@ -180,6 +191,29 @@ fn main() -> anyhow::Result<()> {
     let output_dirname = args.model_tag.clone().unwrap_or_else(|| format!("d{}", args.depth));
     let checkpoint_dir = base_dir.join("base_checkpoints").join(&output_dirname);
 
+    // If we are resuming, overwrite the model parameters with those of the checkpoint
+    let resuming = args.resume_from_step != -1;
+    let mut resume_meta: Option<serde_json::Value> = None;
+    if resuming {
+        anyhow::ensure!(args.resume_from_step >= 0, "invalid --resume-from-step");
+        print0(&format!("Resuming optimization from step {}", args.resume_from_step));
+        let (model_data, meta_data) =
+            load_checkpoint(&checkpoint_dir, args.resume_from_step as usize, &device)?;
+        let model_data: HashMap<String, Tensor> = model_data
+            .into_iter()
+            .map(|(k, v)| {
+                let k = k.strip_prefix("_orig_mod.").unwrap_or(&k).to_string();
+                Ok((k, v.to_dtype(DType::F32)?))
+            })
+            .collect::<candle_core::Result<_>>()?;
+        // strict: the checkpoint must provide every parameter of the model
+        for name in varmap.data().lock().unwrap().keys() {
+            anyhow::ensure!(model_data.contains_key(name), "checkpoint is missing parameter {name}");
+        }
+        varmap.set(model_data.iter().map(|(k, v)| (k, v)))?;
+        resume_meta = Some(meta_data);
+    }
+
     // Scaling laws and muP extrapolations: training horizon, batch size, LRs, weight decay
     let param_counts = model.num_scaling_params();
     print0("Parameter counts:");
@@ -238,10 +272,21 @@ fn main() -> anyhow::Result<()> {
         weight_decay_scaled,
         args.scalar_lr * batch_lr_scale,
     )?;
+    if resuming {
+        let optimizer_data =
+            load_optimizer_state(&checkpoint_dir, args.resume_from_step as usize, &device)?
+                .ok_or_else(|| anyhow::anyhow!("optimizer checkpoint not found, cannot resume"))?;
+        optimizer.load_state_dict(&optimizer_data)?;
+    }
 
     // Initialize the DataLoaders for train/val
+    let dataloader_resume_state: Option<LoaderState> = match &resume_meta {
+        Some(meta) => Some(serde_json::from_value(meta["dataloader_state_dict"].clone())?),
+        None => None,
+    };
     let mut train_loader = DataLoader::new(
-        &tokenizer, args.device_batch_size, args.max_seq_len, "train", None, 128, &device, None, 1000,
+        &tokenizer, args.device_batch_size, args.max_seq_len, "train", None, 128, &device,
+        dataloader_resume_state.as_ref(), 1000,
     )?;
     let (mut x, mut y, mut dataloader_state): (Tensor, Tensor, LoaderState) = train_loader.next_batch()?;
 
@@ -297,12 +342,21 @@ fn main() -> anyhow::Result<()> {
         weight_decay_scaled * 0.5 * (1.0 + (std::f64::consts::PI * it as f64 / num_iterations as f64).cos())
     };
 
-    // Loop state
+    // Loop state (variables updated by the training loop)
     let mut step = 0usize;
-    let mut val_bpb: Option<f64> = None;
+    let mut val_bpb: Option<f64> = None; // will be set if eval_every > 0
     let mut min_val_bpb = f64::INFINITY;
     let mut smooth_train_loss = 0f64; // EMA of training loss
-    let mut total_training_time = 0f64;
+    let mut total_training_time = 0f64; // total wall-clock time of training
+    if let Some(meta) = &resume_meta {
+        let loop_state = &meta["loop_state"];
+        step = meta["step"].as_u64().ok_or_else(|| anyhow::anyhow!("checkpoint meta has no step"))? as usize;
+        val_bpb = meta["val_bpb"].as_f64();
+        // (a non-finite min_val_bpb is stored as null in json)
+        min_val_bpb = loop_state["min_val_bpb"].as_f64().unwrap_or(f64::INFINITY);
+        smooth_train_loss = loop_state["smooth_train_loss"].as_f64().unwrap_or(0.0);
+        total_training_time = loop_state["total_training_time"].as_f64().unwrap_or(0.0);
+    }
 
     // gradient accumulation micro-steps to reach the desired total batch size
     let tokens_per_fwdbwd = args.device_batch_size * args.max_seq_len;
@@ -339,6 +393,17 @@ fn main() -> anyhow::Result<()> {
             val_bpb = Some(bpb);
         }
 
+        // once in a while: estimate the CORE metric
+        if args.core_metric_every > 0
+            && (last_step || (step > 0 && step % args.core_metric_every as usize == 0))
+        {
+            let results = evaluate_core(&model, &tokenizer, &device, args.core_metric_max_per_task)?;
+            print0(&format!(
+                "Step {step:05} | CORE metric: {:.4}",
+                results["core_metric"].as_f64().unwrap_or(f64::NAN)
+            ));
+        }
+
         // once in a while: sample from the model
         if args.sample_every > 0 && (last_step || (step > 0 && step % args.sample_every as usize == 0)) {
             let prompts = [
@@ -358,8 +423,14 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        // save checkpoint: at the end of the run, or every save_every steps (not at step 0)
-        if last_step || (step > 0 && args.save_every > 0 && step % args.save_every as usize == 0) {
+        // save checkpoint: at the end of the run, or every save_every steps, except at
+        // the first step or the resume step
+        if last_step
+            || (step > 0
+                && step as i64 != args.resume_from_step
+                && args.save_every > 0
+                && step % args.save_every as usize == 0)
+        {
             let model_data: HashMap<String, Tensor> = all_vars
                 .iter()
                 .map(|(k, v)| (k.clone(), v.as_tensor().clone()))

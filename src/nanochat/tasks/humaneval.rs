@@ -5,7 +5,8 @@
 use candle_core::Result;
 use serde_json::{json, Value};
 
-use super::common::{hf_data_dir, load_jsonl_rows, Slice, Task};
+use super::common::{Slice, Task};
+use super::hub::load_shuffled;
 use crate::nanochat::execution::execute_code;
 
 /// Extract import statements from the beginning of a code block.
@@ -40,8 +41,8 @@ pub struct HumanEval {
 
 impl HumanEval {
     pub fn new(slice: Slice) -> Result<Self> {
-        let path = hf_data_dir().join("humaneval_test.jsonl");
-        let rows = load_jsonl_rows(&path)?;
+        // note: this dataset has no named subsets, its parquet config on the hub is "openai_humaneval"
+        let rows = load_shuffled("openai/openai_humaneval", "openai_humaneval", "test")?;
         Ok(Self::from_rows(rows, slice))
     }
 
