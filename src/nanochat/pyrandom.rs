@@ -17,7 +17,10 @@ pub struct PyRandom {
 impl PyRandom {
     /// random.Random(seed) for a non-negative integer seed.
     pub fn new(seed: u64) -> Self {
-        let mut rng = Self { mt: [0; N], mti: N + 1 };
+        let mut rng = Self {
+            mt: [0; N],
+            mti: N + 1,
+        };
         // CPython splits the int into 32-bit words (little-endian) for init_by_array
         let mut key = vec![(seed & 0xffffffff) as u32];
         if seed > u32::MAX as u64 {

@@ -18,14 +18,21 @@ pub struct Slice {
 
 impl Default for Slice {
     fn default() -> Self {
-        Self { start: 0, stop: None, step: 1 }
+        Self {
+            start: 0,
+            stop: None,
+            step: 1,
+        }
     }
 }
 
 impl Slice {
     pub fn new(start: usize, stop: Option<usize>, step: usize) -> Self {
         if let Some(stop) = stop {
-            assert!(stop >= start, "Stop should be greater than or equal to start");
+            assert!(
+                stop >= start,
+                "Stop should be greater than or equal to start"
+            );
         }
         assert!(step >= 1, "Step must be strictly positive");
         Self { start, stop, step }
@@ -93,7 +100,12 @@ impl TaskMixture {
         // Deterministically shuffle to mix tasks throughout training
         let mut rng = PyRandom::new(42);
         rng.shuffle(&mut index_map);
-        Self { slice: Slice::default(), tasks, num_conversations, index_map }
+        Self {
+            slice: Slice::default(),
+            tasks,
+            num_conversations,
+            index_map,
+        }
     }
 }
 
@@ -109,7 +121,10 @@ impl Task for TaskMixture {
     }
     /// Access conversations according to a deterministic shuffle of all examples.
     fn get_example(&self, index: usize) -> Result<Value> {
-        assert!(index < self.num_conversations, "Index {index} out of range for mixture");
+        assert!(
+            index < self.num_conversations,
+            "Index {index} out of range for mixture"
+        );
         let (task_idx, local_idx) = self.index_map[index];
         self.tasks[task_idx].get(local_idx)
     }
@@ -128,7 +143,12 @@ impl TaskSequence {
     pub fn new(tasks: Vec<Box<dyn Task>>) -> Self {
         let lengths: Vec<usize> = tasks.iter().map(|t| t.len()).collect();
         let num_conversations = lengths.iter().sum();
-        Self { slice: Slice::default(), tasks, lengths, num_conversations }
+        Self {
+            slice: Slice::default(),
+            tasks,
+            lengths,
+            num_conversations,
+        }
     }
 }
 
@@ -143,7 +163,10 @@ impl Task for TaskSequence {
         self.num_conversations
     }
     fn get_example(&self, index: usize) -> Result<Value> {
-        assert!(index < self.num_conversations, "Index {index} out of range for sequence");
+        assert!(
+            index < self.num_conversations,
+            "Index {index} out of range for sequence"
+        );
         let mut index = index;
         for (task_idx, task_length) in self.lengths.iter().enumerate() {
             if index < *task_length {
@@ -178,8 +201,6 @@ pub fn load_jsonl_rows(path: &std::path::Path) -> Result<Vec<Value>> {
         .map_err(|e| candle_core::Error::Msg(format!("Error reading {}: {e}", path.display())))?;
     data.lines()
         .filter(|line| !line.trim().is_empty())
-        .map(|line| {
-            serde_json::from_str(line).map_err(|e| candle_core::Error::Msg(e.to_string()))
-        })
+        .map(|line| serde_json::from_str(line).map_err(|e| candle_core::Error::Msg(e.to_string())))
         .collect()
 }

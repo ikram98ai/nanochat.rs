@@ -106,9 +106,17 @@ pub struct SpellingBee {
 
 impl SpellingBee {
     pub fn new(size: usize, split: &str, slice: Slice) -> Result<Self> {
-        assert!(split == "train" || split == "test", "SpellingBee split must be train|test");
+        assert!(
+            split == "train" || split == "test",
+            "SpellingBee split must be train|test"
+        );
         let words = load_word_list()?;
-        Ok(Self { slice, size, split: split.to_string(), words })
+        Ok(Self {
+            slice,
+            size,
+            split: split.to_string(),
+            words,
+        })
     }
 }
 
@@ -158,8 +166,9 @@ impl Task for SpellingBee {
         let word_quote = *rng.choice(&quote_options); // is the word quoted?
         let letter_wrapped = format!("{letter_quote}{letter}{letter_quote}");
         let word_wrapped = format!("{word_quote}{word}{word_quote}");
-        let mut user_msg =
-            template.replace("{letter}", &letter_wrapped).replace("{word}", &word_wrapped);
+        let mut user_msg = template
+            .replace("{letter}", &letter_wrapped)
+            .replace("{word}", &word_wrapped);
         if rng.random() < 0.5 {
             // 50% of people don't even use question marks
             user_msg.push('?');
@@ -208,7 +217,10 @@ impl Task for SpellingBee {
     fn evaluate(&self, conversation: &Value, assistant_response: &str) -> Result<bool> {
         let messages = conversation["messages"].as_array().unwrap();
         let assistant_message = messages.last().unwrap();
-        assert!(assistant_message["role"] == "assistant", "Last message must be from the Assistant");
+        assert!(
+            assistant_message["role"] == "assistant",
+            "Last message must be from the Assistant"
+        );
         let parts = assistant_message["content"]
             .as_array()
             .expect("This is expected to be a list of parts");
@@ -230,12 +242,20 @@ pub struct SimpleSpelling {
 
 impl SimpleSpelling {
     pub fn new(size: usize, split: &str, slice: Slice) -> Result<Self> {
-        assert!(split == "train" || split == "test", "SpellingBee split must be train|test");
+        assert!(
+            split == "train" || split == "test",
+            "SpellingBee split must be train|test"
+        );
         let mut words = load_word_list()?;
         // use a different word order than the SpellingBee task
         let mut rng = PyRandom::new(42);
         rng.shuffle(&mut words);
-        Ok(Self { slice, size, split: split.to_string(), words })
+        Ok(Self {
+            slice,
+            size,
+            split: split.to_string(),
+            words,
+        })
     }
 }
 

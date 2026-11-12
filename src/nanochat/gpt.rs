@@ -10,7 +10,7 @@
 //! - Group-Query Attention (GQA) support for more efficient inference
 //! - sliding window attention with a per-layer long/short pattern
 
-use candle_core::{D, DType, IndexOp, Result, Tensor};
+use candle_core::{DType, IndexOp, Result, Tensor, D};
 use candle_nn::ops::{log_softmax, sigmoid};
 use candle_nn::{embedding, Embedding, Linear, Module, VarBuilder};
 use rand::rngs::StdRng;
@@ -105,7 +105,11 @@ impl CausalSelfAttention {
         let c_proj = candle_nn::linear_no_bias(n_embd, n_embd, vb.pp("c_proj"))?;
         let ve_gate_channels = 12;
         let ve_gate = if has_ve(layer_idx, config.n_layer) {
-            Some(candle_nn::linear_no_bias(ve_gate_channels, n_kv_head, vb.pp("ve_gate"))?)
+            Some(candle_nn::linear_no_bias(
+                ve_gate_channels,
+                n_kv_head,
+                vb.pp("ve_gate"),
+            )?)
         } else {
             None
         };
@@ -135,15 +139,26 @@ impl CausalSelfAttention {
 
         // Project the input to get queries, keys, and values
         // Shape: (B, T, H, D)
-        let q = self.c_q.forward(x)?.reshape((b, t, self.n_head, self.head_dim))?;
-        let k = self.c_k.forward(x)?.reshape((b, t, self.n_kv_head, self.head_dim))?;
-        let mut v = self.c_v.forward(x)?.reshape((b, t, self.n_kv_head, self.head_dim))?;
+        let q = self
+            .c_q
+            .forward(x)?
+            .reshape((b, t, self.n_head, self.head_dim))?;
+        let k = self
+            .c_k
+            .forward(x)?
+            .reshape((b, t, self.n_kv_head, self.head_dim))?;
+        let mut v = self
+            .c_v
+            .forward(x)?
+            .reshape((b, t, self.n_kv_head, self.head_dim))?;
 
         // Value residual (ResFormer): mix in value embedding with input-dependent gate per head
         if let (Some(ve), Some(ve_gate)) = (ve, &self.ve_gate) {
             let ve = ve.reshape((b, t, self.n_kv_head, self.head_dim))?;
             // (B, T, n_kv_head), range (0, 3)
-            let gate_in = x.narrow(D::Minus1, 0, self.ve_gate_channels)?.contiguous()?;
+            let gate_in = x
+                .narrow(D::Minus1, 0, self.ve_gate_channels)?
+                .contiguous()?;
             let gate = (sigmoid(&ve_gate.forward(&gate_in)?)? * 3.0)?;
             v = (v + gate.unsqueeze(D::Minus1)?.broadcast_mul(&ve)?)?;
         }
@@ -164,7 +179,15 @@ impl CausalSelfAttention {
             }
             Some(kv_cache) => {
                 // Inference: attention against the KV cache, which handles cache management
-                let y = flash_attn_with_kvcache(&q, kv_cache, self.layer_idx, &k, &v, true, window_size)?;
+                let y = flash_attn_with_kvcache(
+                    &q,
+                    kv_cache,
+                    self.layer_idx,
+                    &k,
+                    &v,
+                    true,
+                    window_size,
+                )?;
                 // Advance position after last layer processes
                 if self.layer_idx == kv_cache.n_layers - 1 {
                     kv_cache.advance(t);
@@ -218,7 +241,9 @@ impl Block {
         window_size: (i64, i64),
         kv_cache: Option<&KVCache>,
     ) -> Result<Tensor> {
-        let x = (x + self.attn.forward(&norm(x)?, ve, cos_sin, window_size, kv_cache)?)?;
+        let x = (x + self
+            .attn
+            .forward(&norm(x)?, ve, cos_sin, window_size, kv_cache)?)?;
         let x = (&x + self.mlp.forward(&norm(&x)?)?)?;
         Ok(x)
     }
@@ -271,7 +296,8 @@ impl GPT {
         for layer_idx in 0..config.n_layer {
             h.push(Block::new(&config, layer_idx, vb_t.pp("h").pp(layer_idx))?);
         }
-        let lm_head = candle_nn::linear_no_bias(config.n_embd, padded_vocab_size, vb.pp("lm_head"))?;
+        let lm_head =
+            candle_nn::linear_no_bias(config.n_embd, padded_vocab_size, vb.pp("lm_head"))?;
         let resid_lambdas = vb.get(config.n_layer, "resid_lambdas")?;
         let x0_lambdas = vb.get(config.n_layer, "x0_lambdas")?;
         let smear_gate = candle_nn::linear_no_bias(24, 1, vb.pp("smear_gate"))?;
@@ -282,7 +308,11 @@ impl GPT {
         let mut value_embeds = Vec::with_capacity(config.n_layer);
         for i in 0..config.n_layer {
             if has_ve(i, config.n_layer) {
-                value_embeds.push(Some(embedding(padded_vocab_size, kv_dim, vb.pp("value_embeds").pp(i))?));
+                value_embeds.push(Some(embedding(
+                    padded_vocab_size,
+                    kv_dim,
+                    vb.pp("value_embeds").pp(i),
+                )?));
             } else {
                 value_embeds.push(None);
             }
@@ -344,37 +374,88 @@ impl GPT {
             let data: Vec<f32> = (0..shape.0 * shape.1).map(|_| rng.sample(dist)).collect();
             Tensor::from_vec(data, shape, device)
         };
-        let uniform = |shape: (usize, usize), lo: f64, hi: f64, rng: &mut StdRng| -> Result<Tensor> {
-            let data: Vec<f32> =
-                (0..shape.0 * shape.1).map(|_| rng.random_range(lo as f32..hi as f32)).collect();
-            Tensor::from_vec(data, shape, device)
-        };
+        let uniform =
+            |shape: (usize, usize), lo: f64, hi: f64, rng: &mut StdRng| -> Result<Tensor> {
+                let data: Vec<f32> = (0..shape.0 * shape.1)
+                    .map(|_| rng.random_range(lo as f32..hi as f32))
+                    .collect();
+                Tensor::from_vec(data, shape, device)
+            };
 
-        tensors.insert("transformer.wte.weight".to_string(), normal((padded_vocab_size, n_embd), 0.8, &mut rng)?);
-        tensors.insert("lm_head.weight".to_string(), normal((padded_vocab_size, n_embd), 0.001, &mut rng)?);
+        tensors.insert(
+            "transformer.wte.weight".to_string(),
+            normal((padded_vocab_size, n_embd), 0.8, &mut rng)?,
+        );
+        tensors.insert(
+            "lm_head.weight".to_string(),
+            normal((padded_vocab_size, n_embd), 0.001, &mut rng)?,
+        );
         for i in 0..n_layer {
             let p = format!("transformer.h.{i}");
-            tensors.insert(format!("{p}.attn.c_q.weight"), uniform((n_embd, n_embd), -s, s, &mut rng)?);
-            tensors.insert(format!("{p}.attn.c_k.weight"), uniform((kv_dim, n_embd), -s, s, &mut rng)?);
-            tensors.insert(format!("{p}.attn.c_v.weight"), uniform((kv_dim, n_embd), -s, s, &mut rng)?);
-            tensors.insert(format!("{p}.attn.c_proj.weight"), Tensor::zeros((n_embd, n_embd), DType::F32, device)?);
-            tensors.insert(format!("{p}.mlp.c_fc.weight"), uniform((4 * n_embd, n_embd), -s * 0.4, s * 0.4, &mut rng)?);
-            tensors.insert(format!("{p}.mlp.c_proj.weight"), Tensor::zeros((n_embd, 4 * n_embd), DType::F32, device)?);
+            tensors.insert(
+                format!("{p}.attn.c_q.weight"),
+                uniform((n_embd, n_embd), -s, s, &mut rng)?,
+            );
+            tensors.insert(
+                format!("{p}.attn.c_k.weight"),
+                uniform((kv_dim, n_embd), -s, s, &mut rng)?,
+            );
+            tensors.insert(
+                format!("{p}.attn.c_v.weight"),
+                uniform((kv_dim, n_embd), -s, s, &mut rng)?,
+            );
+            tensors.insert(
+                format!("{p}.attn.c_proj.weight"),
+                Tensor::zeros((n_embd, n_embd), DType::F32, device)?,
+            );
+            tensors.insert(
+                format!("{p}.mlp.c_fc.weight"),
+                uniform((4 * n_embd, n_embd), -s * 0.4, s * 0.4, &mut rng)?,
+            );
+            tensors.insert(
+                format!("{p}.mlp.c_proj.weight"),
+                Tensor::zeros((n_embd, 4 * n_embd), DType::F32, device)?,
+            );
             if has_ve(i, n_layer) {
-                tensors.insert(format!("value_embeds.{i}.weight"), uniform((padded_vocab_size, kv_dim), -s, s, &mut rng)?);
-                tensors.insert(format!("{p}.attn.ve_gate.weight"), uniform((config.n_kv_head, 12), 0.0, 0.02, &mut rng)?);
+                tensors.insert(
+                    format!("value_embeds.{i}.weight"),
+                    uniform((padded_vocab_size, kv_dim), -s, s, &mut rng)?,
+                );
+                tensors.insert(
+                    format!("{p}.attn.ve_gate.weight"),
+                    uniform((config.n_kv_head, 12), 0.0, 0.02, &mut rng)?,
+                );
             }
         }
         // Per-layer resid init: stronger residual at early layers, weaker at deep layers
         let denom = (n_layer - 1).max(1) as f32;
-        let resid: Vec<f32> = (0..n_layer).map(|i| 1.15 - 0.10 * i as f32 / denom).collect();
+        let resid: Vec<f32> = (0..n_layer)
+            .map(|i| 1.15 - 0.10 * i as f32 / denom)
+            .collect();
         // Decaying x0 init: earlier layers get more input embedding blending
-        let x0: Vec<f32> = (0..n_layer).map(|i| 0.20 - 0.15 * i as f32 / denom).collect();
-        tensors.insert("resid_lambdas".to_string(), Tensor::from_vec(resid, n_layer, device)?);
-        tensors.insert("x0_lambdas".to_string(), Tensor::from_vec(x0, n_layer, device)?);
-        tensors.insert("smear_lambda".to_string(), Tensor::zeros(1, DType::F32, device)?);
-        tensors.insert("backout_lambda".to_string(), (Tensor::ones(1, DType::F32, device)? * 0.2)?);
-        tensors.insert("smear_gate.weight".to_string(), uniform((1, 24), 0.0, 0.02, &mut rng)?);
+        let x0: Vec<f32> = (0..n_layer)
+            .map(|i| 0.20 - 0.15 * i as f32 / denom)
+            .collect();
+        tensors.insert(
+            "resid_lambdas".to_string(),
+            Tensor::from_vec(resid, n_layer, device)?,
+        );
+        tensors.insert(
+            "x0_lambdas".to_string(),
+            Tensor::from_vec(x0, n_layer, device)?,
+        );
+        tensors.insert(
+            "smear_lambda".to_string(),
+            Tensor::zeros(1, DType::F32, device)?,
+        );
+        tensors.insert(
+            "backout_lambda".to_string(),
+            (Tensor::ones(1, DType::F32, device)? * 0.2)?,
+        );
+        tensors.insert(
+            "smear_gate.weight".to_string(),
+            uniform((1, 24), 0.0, 0.02, &mut rng)?,
+        );
         Ok(tensors)
     }
 
@@ -454,7 +535,10 @@ impl GPT {
                     + b.attn.c_k.weight().elem_count()
                     + b.attn.c_v.weight().elem_count()
                     + b.attn.c_proj.weight().elem_count()
-                    + b.attn.ve_gate.as_ref().map_or(0, |g| g.weight().elem_count())
+                    + b.attn
+                        .ve_gate
+                        .as_ref()
+                        .map_or(0, |g| g.weight().elem_count())
                     + b.mlp.c_fc.weight().elem_count()
                     + b.mlp.c_proj.weight().elem_count()
             })
@@ -480,7 +564,11 @@ impl GPT {
         let mut attn_flops = 0usize;
         for window_size in &self.window_sizes {
             let window = window_size.0; // (left, right) tuple, we use left
-            let effective_seq = if window < 0 { t } else { (window as usize).min(t) };
+            let effective_seq = if window < 0 {
+                t
+            } else {
+                (window as usize).min(t)
+            };
             attn_flops += 12 * h * q * effective_seq;
         }
         6 * self.num_matmul_params() + attn_flops
@@ -498,7 +586,9 @@ impl GPT {
     /// Left attention window of each layer, in tokens.
     fn windows(&self) -> impl Iterator<Item = usize> + '_ {
         let t = self.config.sequence_len;
-        self.window_sizes.iter().map(move |w| if w.0 < 0 { t } else { w.0 as usize })
+        self.window_sizes
+            .iter()
+            .map(move |w| if w.0 < 0 { t } else { w.0 as usize })
     }
 
     /// Forward FLOPs to decode one token at a given context length during inference:
@@ -506,7 +596,10 @@ impl GPT {
     pub fn estimate_decode_flops(&self, context_len: usize) -> usize {
         let h = self.config.n_head;
         let q = self.config.n_embd / self.config.n_head;
-        let attn_flops: usize = self.windows().map(|window| 4 * h * q * context_len.min(window)).sum();
+        let attn_flops: usize = self
+            .windows()
+            .map(|window| 4 * h * q * context_len.min(window))
+            .sum();
         2 * self.num_matmul_params() + attn_flops
     }
 
@@ -536,7 +629,9 @@ impl GPT {
         let head_dim = self.config.n_embd / self.config.n_head;
         let kv_dtype_bytes = DType::F32.size_in_bytes();
         self.windows()
-            .map(|window| 2 * self.config.n_kv_head * head_dim * kv_dtype_bytes * context_len.min(window))
+            .map(|window| {
+                2 * self.config.n_kv_head * head_dim * kv_dtype_bytes * context_len.min(window)
+            })
             .sum()
     }
 
@@ -600,7 +695,11 @@ impl GPT {
         let lm_head_params = vec![get("lm_head.weight")?];
         let resid_params = vec![get("resid_lambdas")?];
         let x0_params = vec![get("x0_lambdas")?];
-        let smear_params = vec![get("smear_gate.weight")?, get("smear_lambda")?, get("backout_lambda")?];
+        let smear_params = vec![
+            get("smear_gate.weight")?,
+            get("smear_lambda")?,
+            get("backout_lambda")?,
+        ];
 
         // Scale the LR for the AdamW parameters by ∝1/√dmodel (tuned for 768 dim model)
         let dmodel_lr_scale = (model_dim as f64 / 768.0).powf(-0.5);
@@ -611,9 +710,27 @@ impl GPT {
         // Build param_groups with all required fields explicit
         let mut param_groups = vec![
             // AdamW groups (embeddings, lm_head, scalars)
-            ParamGroup::adamw(lm_head_params, unembedding_lr * dmodel_lr_scale, (0.8, 0.96), 1e-10, 0.01),
-            ParamGroup::adamw(embedding_params, embedding_lr * dmodel_lr_scale, (0.8, 0.995), 1e-10, 0.001),
-            ParamGroup::adamw(value_embeds_params, embedding_lr * dmodel_lr_scale * 0.5, (0.8, 0.995), 1e-10, 0.01),
+            ParamGroup::adamw(
+                lm_head_params,
+                unembedding_lr * dmodel_lr_scale,
+                (0.8, 0.96),
+                1e-10,
+                0.01,
+            ),
+            ParamGroup::adamw(
+                embedding_params,
+                embedding_lr * dmodel_lr_scale,
+                (0.8, 0.995),
+                1e-10,
+                0.001,
+            ),
+            ParamGroup::adamw(
+                value_embeds_params,
+                embedding_lr * dmodel_lr_scale * 0.5,
+                (0.8, 0.995),
+                1e-10,
+                0.01,
+            ),
             ParamGroup::adamw(resid_params, scalar_lr * 0.01, (0.8, 0.95), 1e-10, 0.05),
             ParamGroup::adamw(x0_params, scalar_lr, (0.96, 0.95), 1e-10, 0.0), // higher beta1 for x0
             ParamGroup::adamw(smear_params, 0.2, (0.8, 0.95), 1e-10, 0.0),
@@ -623,9 +740,19 @@ impl GPT {
         shapes.sort();
         shapes.dedup();
         for shape in shapes {
-            let group_params: Vec<_> =
-                matrix_params.iter().filter(|p| p.dims() == shape.as_slice()).cloned().collect();
-            param_groups.push(ParamGroup::muon(group_params, matrix_lr, 0.95, 5, 0.9, weight_decay));
+            let group_params: Vec<_> = matrix_params
+                .iter()
+                .filter(|p| p.dims() == shape.as_slice())
+                .cloned()
+                .collect();
+            param_groups.push(ParamGroup::muon(
+                group_params,
+                matrix_lr,
+                0.95,
+                5,
+                0.9,
+                weight_decay,
+            ));
         }
         Ok(super::optim::MuonAdamW::new(param_groups))
     }
@@ -661,8 +788,12 @@ impl GPT {
         let smear = |x: &Tensor| -> Result<Tensor> {
             // gate = smear_lambda * sigmoid(smear_gate(x[:, 1:, :24])), applied to positions 1+
             let tail = x.narrow(1, 1, t - 1)?;
-            let gate = sigmoid(&self.smear_gate.forward(&tail.narrow(2, 0, 24)?.contiguous()?)?)?
-                .broadcast_mul(&self.smear_lambda)?;
+            let gate = sigmoid(
+                &self
+                    .smear_gate
+                    .forward(&tail.narrow(2, 0, 24)?.contiguous()?)?,
+            )?
+            .broadcast_mul(&self.smear_lambda)?;
             let smeared = (&tail + gate.broadcast_mul(&x.narrow(1, 0, t - 1)?)?)?;
             Tensor::cat(&[x.narrow(1, 0, 1)?, smeared], 1)
         };
@@ -681,8 +812,12 @@ impl GPT {
                     x = smear(&x)?;
                 } else if let Some(x_pre_smear) = x_pre_smear {
                     // Decode: single token, use cached prev embedding
-                    let gate = sigmoid(&self.smear_gate.forward(&x.narrow(2, 0, 24)?.contiguous()?)?)?
-                        .broadcast_mul(&self.smear_lambda)?;
+                    let gate = sigmoid(
+                        &self
+                            .smear_gate
+                            .forward(&x.narrow(2, 0, 24)?.contiguous()?)?,
+                    )?
+                    .broadcast_mul(&self.smear_lambda)?;
                     x = (&x + gate.broadcast_mul(&x_pre_smear)?)?;
                 }
             }
@@ -700,7 +835,13 @@ impl GPT {
                 Some(ve) => Some(ve.forward(idx)?),
                 None => None,
             };
-            x = block.forward(&x, ve.as_ref(), (&cos, &sin), self.window_sizes[i], kv_cache)?;
+            x = block.forward(
+                &x,
+                ve.as_ref(),
+                (&cos, &sin),
+                self.window_sizes[i],
+                kv_cache,
+            )?;
             if i == backout_layer {
                 x_backout = Some(x.clone());
             }
@@ -790,9 +931,7 @@ pub fn cross_entropy(
     let logits = logits.reshape(((), vocab_size))?;
     let targets = targets.reshape(((),))?.to_dtype(DType::I64)?;
     let log_probs = log_softmax(&logits, D::Minus1)?;
-    let valid = targets
-        .ne(ignore_index)?
-        .to_dtype(DType::F32)?;
+    let valid = targets.ne(ignore_index)?.to_dtype(DType::F32)?;
     // clamp ignored targets to a valid row for the gather, then mask them out
     let gather_idx = targets.clamp(0i64, (vocab_size - 1) as i64)?.unsqueeze(1)?;
     let picked = log_probs.gather(&gather_idx, 1)?.squeeze(1)?;

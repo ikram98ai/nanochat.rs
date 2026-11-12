@@ -65,7 +65,10 @@ pub fn download_file_with_lock(
 }
 
 pub fn print0(s: &str) {
-    let ddp_rank: usize = std::env::var("RANK").ok().and_then(|r| r.parse().ok()).unwrap_or(0);
+    let ddp_rank: usize = std::env::var("RANK")
+        .ok()
+        .and_then(|r| r.parse().ok())
+        .unwrap_or(0);
     if ddp_rank == 0 {
         println!("{s}");
     }

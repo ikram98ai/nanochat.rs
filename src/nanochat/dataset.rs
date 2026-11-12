@@ -31,7 +31,10 @@ fn msg(e: impl std::fmt::Display) -> candle_core::Error {
 }
 
 /// Looks into a data dir and returns full paths to all parquet files, sorted.
-pub fn list_parquet_files(dir: Option<&std::path::Path>, warn_on_legacy: bool) -> Result<Vec<PathBuf>> {
+pub fn list_parquet_files(
+    dir: Option<&std::path::Path>,
+    warn_on_legacy: bool,
+) -> Result<Vec<PathBuf>> {
     let mut dir = dir.map(|d| d.to_path_buf()).unwrap_or_else(data_dir);
 
     // Legacy-supporting code due to the upgrade from FinewebEdu-100B to ClimbMix-400B
@@ -102,10 +105,15 @@ pub fn parquets_iter_batched(
     start: usize,
     step: usize,
 ) -> Result<impl Iterator<Item = Result<Vec<String>>>> {
-    assert!(split == "train" || split == "val", "split must be 'train' or 'val'");
+    assert!(
+        split == "train" || split == "val",
+        "split must be 'train' or 'val'"
+    );
     let paths = list_parquet_files(None, false)?;
     if paths.is_empty() {
-        return Err(msg("No dataset parquet files found: download the shards first (make data)"));
+        return Err(msg(
+            "No dataset parquet files found: download the shards first (make data)",
+        ));
     }
     let paths: Vec<PathBuf> = if split == "train" {
         paths[..paths.len() - 1].to_vec()
@@ -121,7 +129,9 @@ pub fn parquets_iter_batched(
             rg += step;
         }
     }
-    Ok(iter_state.into_iter().map(|(path, rg)| read_row_group_texts(&path, rg)))
+    Ok(iter_state
+        .into_iter()
+        .map(|(path, rg)| read_row_group_texts(&path, rg)))
 }
 
 /// Downloads a single file index, with some backoff.

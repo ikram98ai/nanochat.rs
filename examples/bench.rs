@@ -16,8 +16,9 @@ fn bench(name: &str, model: &GPT, prompt_len: usize, decode_steps: usize) -> any
     let config = &model.config;
     let device = Device::Cpu;
     let mut rng = StdRng::seed_from_u64(11);
-    let prompt: Vec<i64> =
-        (0..prompt_len).map(|_| rng.random_range(0..config.vocab_size as i64)).collect();
+    let prompt: Vec<i64> = (0..prompt_len)
+        .map(|_| rng.random_range(0..config.vocab_size as i64))
+        .collect();
     let prompt = Tensor::from_vec(prompt, (1, prompt_len), &device)?;
     let kv = KVCache::new(
         1,
@@ -33,7 +34,11 @@ fn bench(name: &str, model: &GPT, prompt_len: usize, decode_steps: usize) -> any
     let t1 = Instant::now();
     for _ in 0..decode_steps {
         let t = logits.dim(1)?;
-        let next_tok = logits.narrow(1, t - 1, 1)?.squeeze(1)?.argmax(1)?.to_vec1::<u32>()?[0];
+        let next_tok = logits
+            .narrow(1, t - 1, 1)?
+            .squeeze(1)?
+            .argmax(1)?
+            .to_vec1::<u32>()?[0];
         let ids = Tensor::from_vec(vec![next_tok as i64], (1, 1), &device)?;
         logits = model.forward(&ids, None, Some(&kv), "mean")?;
     }

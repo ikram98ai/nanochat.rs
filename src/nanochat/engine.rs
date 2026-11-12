@@ -75,7 +75,11 @@ impl PyNum {
                 }
                 let q = a.checked_div(b)?;
                 let r = a.checked_rem(b)?;
-                let q = if r != 0 && (r < 0) != (b < 0) { q.checked_sub(1)? } else { q };
+                let q = if r != 0 && (r < 0) != (b < 0) {
+                    q.checked_sub(1)?
+                } else {
+                    q
+                };
                 Some(PyNum::Int(q))
             }
             (a, b) => {
@@ -163,7 +167,10 @@ struct Evaluator<'a> {
 impl<'a> Evaluator<'a> {
     fn eval(expr: &str) -> Option<PyValue> {
         let chars: Vec<char> = expr.chars().collect();
-        let mut e = Evaluator { chars: &chars, pos: 0 };
+        let mut e = Evaluator {
+            chars: &chars,
+            pos: 0,
+        };
         let v = e.expression()?;
         e.skip_ws();
         if e.pos != e.chars.len() {
@@ -270,7 +277,11 @@ impl<'a> Evaluator<'a> {
                 PyValue::Num(_) => return None, // AttributeError in Python
             };
             let start = self.pos;
-            while self.chars.get(self.pos).is_some_and(|c| c.is_ascii_alphabetic()) {
+            while self
+                .chars
+                .get(self.pos)
+                .is_some_and(|c| c.is_ascii_alphabetic())
+            {
                 self.pos += 1;
             }
             let method: String = self.chars[start..self.pos].iter().collect();
@@ -374,16 +385,30 @@ pub fn use_calculator(expr: &str) -> Option<String> {
 
     // Check if it's a string operation we support
     // Allow: strings (single/double quotes), .count(), letters, numbers, spaces, parens
-    let allowed_chars =
-        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'\"()._ ";
+    let allowed_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'\"()._ ";
     if !expr.chars().all(|x| allowed_chars.contains(x)) {
         return None;
     }
 
     // Disallow dangerous patterns
     let dangerous_patterns = [
-        "__", "import", "exec", "eval", "compile", "open", "file", "input", "raw_input",
-        "globals", "locals", "vars", "dir", "getattr", "setattr", "delattr", "hasattr",
+        "__",
+        "import",
+        "exec",
+        "eval",
+        "compile",
+        "open",
+        "file",
+        "input",
+        "raw_input",
+        "globals",
+        "locals",
+        "vars",
+        "dir",
+        "getattr",
+        "setattr",
+        "delattr",
+        "hasattr",
     ];
     let expr_lower = expr.to_lowercase();
     if dangerous_patterns.iter().any(|p| expr_lower.contains(p)) {
@@ -432,8 +457,16 @@ impl KVCache {
         let mut k_cache = Vec::with_capacity(num_layers);
         let mut v_cache = Vec::with_capacity(num_layers);
         for _ in 0..num_layers {
-            k_cache.push(Tensor::zeros((batch_size, seq_len, num_heads, head_dim), dtype, device)?);
-            v_cache.push(Tensor::zeros((batch_size, seq_len, num_heads, head_dim), dtype, device)?);
+            k_cache.push(Tensor::zeros(
+                (batch_size, seq_len, num_heads, head_dim),
+                dtype,
+                device,
+            )?);
+            v_cache.push(Tensor::zeros(
+                (batch_size, seq_len, num_heads, head_dim),
+                dtype,
+                device,
+            )?);
         }
         Ok(Self {
             batch_size,
@@ -466,7 +499,8 @@ impl KVCache {
 
     /// Advance the cache position by num_tokens.
     pub fn advance(&self, num_tokens: usize) {
-        self.cache_seqlens.set(self.cache_seqlens.get() + num_tokens);
+        self.cache_seqlens
+            .set(self.cache_seqlens.get() + num_tokens);
     }
 
     /// Copy cached KV from another cache into this one.
@@ -660,8 +694,15 @@ impl<'a, M: EngineModel, T: EngineTokenizer> Engine<'a, M, T> {
         // 1) Run a batch 1 prefill of the prompt tokens
         let m = self.model.config();
         let (num_heads, head_dim, num_layers) = (m.n_kv_head, m.n_embd / m.n_head, m.n_layer);
-        let kv_cache_prefill =
-            KVCache::new(1, num_heads, tokens.len(), head_dim, num_layers, device, dtype)?;
+        let kv_cache_prefill = KVCache::new(
+            1,
+            num_heads,
+            tokens.len(),
+            head_dim,
+            num_layers,
+            device,
+            dtype,
+        )?;
         let ids: Vec<i64> = tokens.iter().map(|&t| t as i64).collect();
         let ids = Tensor::from_vec(ids, (1, tokens.len()), device)?;
         let logits = self.model.forward(&ids, Some(&kv_cache_prefill))?;
@@ -678,13 +719,22 @@ impl<'a, M: EngineModel, T: EngineTokenizer> Engine<'a, M, T> {
             Some(max_tokens) => tokens.len() + max_tokens,
             None => m.sequence_len,
         };
-        let kv_cache_decode =
-            KVCache::new(num_samples, num_heads, kv_length_hint, head_dim, num_layers, device, dtype)?;
+        let kv_cache_decode = KVCache::new(
+            num_samples,
+            num_heads,
+            kv_length_hint,
+            head_dim,
+            num_layers,
+            device,
+            dtype,
+        )?;
         kv_cache_decode.prefill(&kv_cache_prefill)?;
         drop(kv_cache_prefill); // no need to keep this memory around
 
         // 3) Initialize states for each sample
-        let row_states = (0..num_samples).map(|_| RowState::new(tokens.to_vec())).collect();
+        let row_states = (0..num_samples)
+            .map(|_| RowState::new(tokens.to_vec()))
+            .collect();
 
         // 4) The main generation loop runs in Generate::next
         Ok(Generate {
@@ -776,14 +826,18 @@ impl<'a, M: EngineModel, T: EngineTokenizer> Generate<'a, M, T> {
         if let Some(prev_column) = self.pending_ids.take() {
             let ids: Vec<i64> = prev_column.iter().map(|&t| t as i64).collect();
             let ids = Tensor::from_vec(ids, (self.num_samples, 1), device)?;
-            let logits = self.engine.model.forward(&ids, Some(&self.kv_cache_decode))?;
+            let logits = self
+                .engine
+                .model
+                .forward(&ids, Some(&self.kv_cache_decode))?;
             let t = logits.dim(1)?;
             self.logits = Some(logits.narrow(1, t - 1, 1)?.squeeze(1)?); // (B, vocab_size)
         }
 
         // Sample the next token for each row
         let logits = self.logits.as_ref().unwrap();
-        let sampled_tokens = sample_next_token(logits, &mut self.rng, self.temperature, self.top_k)?;
+        let sampled_tokens =
+            sample_next_token(logits, &mut self.rng, self.temperature, self.top_k)?;
 
         // Process each row: choose the next token, update state, optional tool use
         let mut token_column = Vec::with_capacity(self.num_samples); // next token id along each row

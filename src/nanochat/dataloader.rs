@@ -48,7 +48,10 @@ impl DocumentBatches {
     ) -> Result<Self> {
         let warn_on_legacy = split == "train";
         let parquet_paths = list_parquet_files(data_dir, warn_on_legacy)?;
-        assert!(!parquet_paths.is_empty(), "No dataset parquet files found, did you download the dataset?");
+        assert!(
+            !parquet_paths.is_empty(),
+            "No dataset parquet files found, did you download the dataset?"
+        );
         let parquet_paths: Vec<PathBuf> = if split == "train" {
             parquet_paths[..parquet_paths.len() - 1].to_vec()
         } else {
@@ -76,7 +79,8 @@ impl DocumentBatches {
         loop {
             // serve from the current row group if anything is left
             if self.current_offset < self.current_texts.len() {
-                let end = (self.current_offset + self.tokenizer_batch_size).min(self.current_texts.len());
+                let end =
+                    (self.current_offset + self.tokenizer_batch_size).min(self.current_texts.len());
                 let batch = self.current_texts[self.current_offset..end].to_vec();
                 self.current_offset = end;
                 let state = LoaderState {
@@ -167,7 +171,10 @@ impl<'a> DataLoader<'a> {
         resume_state: Option<&LoaderState>,
         buffer_size: usize,
     ) -> Result<Self> {
-        assert!(split == "train" || split == "val", "split must be 'train' or 'val'");
+        assert!(
+            split == "train" || split == "val",
+            "split must be 'train' or 'val'"
+        );
         let batches = DocumentBatches::new(split, data_dir, resume_state, tokenizer_batch_size)?;
         let bos_token = tokenizer.get_bos_token_id();
         Ok(Self {
@@ -179,7 +186,11 @@ impl<'a> DataLoader<'a> {
             batches,
             bos_token,
             doc_buffer: Vec::new(),
-            state: LoaderState { pq_idx: 0, rg_idx: 0, epoch: 1 },
+            state: LoaderState {
+                pq_idx: 0,
+                rg_idx: 0,
+                epoch: 1,
+            },
             tokenizer_threads: 4,
         })
     }
@@ -188,7 +199,9 @@ impl<'a> DataLoader<'a> {
         let (doc_batch, state) = self.batches.next_batch()?;
         self.state = state;
         // tokenize the batch of documents in parallel, prepending BOS to each
-        let token_lists = self.tokenizer.encode_batch_threaded(&doc_batch, self.tokenizer_threads);
+        let token_lists = self
+            .tokenizer
+            .encode_batch_threaded(&doc_batch, self.tokenizer_threads);
         for ids in token_lists {
             let mut tokens = Vec::with_capacity(ids.len() + 1);
             tokens.push(self.bos_token);
@@ -335,7 +348,9 @@ impl<'a> SftDataLoader<'a> {
             // forever and, once the buffer was full of them, every batch would be
             // all padding.
             let max_tokens = 2048.min(self.seq_len + 1);
-            let (ids, mask) = self.tokenizer.render_conversation(&conversation, max_tokens)?;
+            let (ids, mask) = self
+                .tokenizer
+                .render_conversation(&conversation, max_tokens)?;
             self.conv_buffer.push((ids, mask));
             self.cursor += 1;
             if self.cursor >= dataset_size {
@@ -428,7 +443,11 @@ impl<'a> SftDataLoader<'a> {
                 let target_pos = pos + 1;
                 let masked = mask_row[target_pos] == 0
                     || (row_lengths[i] < row_capacity && target_pos >= row_lengths[i]);
-                targets.push(if masked { -1i64 } else { row[target_pos] as i64 });
+                targets.push(if masked {
+                    -1i64
+                } else {
+                    row[target_pos] as i64
+                });
             }
         }
         let inputs = Tensor::from_vec(inputs, (b, t), &self.device)?;

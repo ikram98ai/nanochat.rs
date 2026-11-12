@@ -8,7 +8,7 @@ use candle_nn::VarBuilder;
 use serde_json::Value;
 
 use super::common::get_base_dir;
-use super::gpt::{GPT, GPTConfig};
+use super::gpt::{GPTConfig, GPT};
 use super::tokenizer::{get_tokenizer, Tokenizer};
 
 fn msg(e: impl std::fmt::Display) -> candle_core::Error {
@@ -16,7 +16,12 @@ fn msg(e: impl std::fmt::Display) -> candle_core::Error {
 }
 
 fn log0(message: &str) {
-    if std::env::var("RANK").ok().and_then(|r| r.parse::<usize>().ok()).unwrap_or(0) == 0 {
+    if std::env::var("RANK")
+        .ok()
+        .and_then(|r| r.parse::<usize>().ok())
+        .unwrap_or(0)
+        == 0
+    {
         log::info!("{message}");
     }
 }
@@ -31,16 +36,26 @@ fn patch_missing_config_keys(model_config_kwargs: &mut Value) {
 }
 
 /// Add default values for new parameters that may be missing in old checkpoints.
-fn patch_missing_keys(model_data: &mut HashMap<String, Tensor>, model_config: &GPTConfig, device: &Device) -> Result<()> {
+fn patch_missing_keys(
+    model_data: &mut HashMap<String, Tensor>,
+    model_config: &GPTConfig,
+    device: &Device,
+) -> Result<()> {
     let n_layer = model_config.n_layer;
     // resid_lambdas defaults to 1.0 (identity scaling)
     if !model_data.contains_key("resid_lambdas") {
-        model_data.insert("resid_lambdas".into(), Tensor::ones(n_layer, DType::F32, device)?);
+        model_data.insert(
+            "resid_lambdas".into(),
+            Tensor::ones(n_layer, DType::F32, device)?,
+        );
         log0("Patching missing resid_lambdas in model data to 1.0");
     }
     // x0_lambdas defaults to 0.0 (disabled)
     if !model_data.contains_key("x0_lambdas") {
-        model_data.insert("x0_lambdas".into(), Tensor::zeros(n_layer, DType::F32, device)?);
+        model_data.insert(
+            "x0_lambdas".into(),
+            Tensor::zeros(n_layer, DType::F32, device)?,
+        );
         log0("Patching missing x0_lambdas in model data to 0.0");
     }
     Ok(())
@@ -60,7 +75,11 @@ pub fn save_checkpoint(
     log::info!("Saved model parameters to: {}", model_path.display());
     // Save the metadata dict as json
     let meta_path = checkpoint_dir.join(format!("meta_{step:06}.json"));
-    std::fs::write(&meta_path, serde_json::to_string_pretty(meta_data).map_err(msg)?).map_err(msg)?;
+    std::fs::write(
+        &meta_path,
+        serde_json::to_string_pretty(meta_data).map_err(msg)?,
+    )
+    .map_err(msg)?;
     log::info!("Saved metadata to: {}", meta_path.display());
     Ok(())
 }
@@ -77,7 +96,9 @@ pub fn load_checkpoint(
     let model_data: HashMap<String, Tensor> = if safetensors_path.exists() {
         candle_core::safetensors::load(&safetensors_path, device)?
     } else {
-        candle_core::pickle::read_all(&pt_path)?.into_iter().collect()
+        candle_core::pickle::read_all(&pt_path)?
+            .into_iter()
+            .collect()
     };
     // Load the metadata
     let meta_path = checkpoint_dir.join(format!("meta_{step:06}.json"));
@@ -95,7 +116,10 @@ pub fn build_model(
     device: &Device,
     phase: &str,
 ) -> Result<(GPT, Tokenizer, Value)> {
-    assert!(phase == "train" || phase == "eval", "Invalid phase: {phase}");
+    assert!(
+        phase == "train" || phase == "eval",
+        "Invalid phase: {phase}"
+    );
     let (model_data, meta_data) = load_checkpoint(checkpoint_dir, step, device)?;
     // Convert reduced-precision tensors to float for CPU inference,
     // and fix torch compile checkpoints which prepend all keys with _orig_mod.
@@ -103,7 +127,11 @@ pub fn build_model(
         .into_iter()
         .map(|(k, v)| {
             let k = k.strip_prefix("_orig_mod.").unwrap_or(&k).to_string();
-            let v = if v.dtype() != DType::F32 { v.to_dtype(DType::F32)? } else { v };
+            let v = if v.dtype() != DType::F32 {
+                v.to_dtype(DType::F32)?
+            } else {
+                v
+            };
             Ok((k, v))
         })
         .collect::<Result<_>>()?;
@@ -129,13 +157,21 @@ pub fn build_model(
 /// Attempt to guess the model tag: take the biggest model available.
 pub fn find_largest_model(checkpoints_dir: &Path) -> Result<String> {
     let model_tags: Vec<String> = std::fs::read_dir(checkpoints_dir)
-        .map_err(|e| msg(format!("No checkpoints found in {}: {e}", checkpoints_dir.display())))?
+        .map_err(|e| {
+            msg(format!(
+                "No checkpoints found in {}: {e}",
+                checkpoints_dir.display()
+            ))
+        })?
         .flatten()
         .filter(|e| e.path().is_dir())
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
     if model_tags.is_empty() {
-        return Err(msg(format!("No checkpoints found in {}", checkpoints_dir.display())));
+        return Err(msg(format!(
+            "No checkpoints found in {}",
+            checkpoints_dir.display()
+        )));
     }
     // 1) normally all model tags are of the form d<number>, try that first:
     let mut candidates: Vec<(usize, &String)> = model_tags
@@ -172,20 +208,33 @@ pub fn find_largest_model(checkpoints_dir: &Path) -> Result<String> {
 pub fn find_last_step(checkpoint_dir: &Path) -> Result<usize> {
     let mut last_step: Option<usize> = None;
     for entry in std::fs::read_dir(checkpoint_dir)
-        .map_err(|e| msg(format!("No checkpoints found in {}: {e}", checkpoint_dir.display())))?
+        .map_err(|e| {
+            msg(format!(
+                "No checkpoints found in {}: {e}",
+                checkpoint_dir.display()
+            ))
+        })?
         .flatten()
     {
         let name = entry.file_name().to_string_lossy().into_owned();
         let step = name
             .strip_prefix("model_")
-            .and_then(|rest| rest.strip_suffix(".pt").or_else(|| rest.strip_suffix(".safetensors")))
+            .and_then(|rest| {
+                rest.strip_suffix(".pt")
+                    .or_else(|| rest.strip_suffix(".safetensors"))
+            })
             .filter(|step_str| !step_str.is_empty() && step_str.chars().all(|c| c.is_ascii_digit()))
             .and_then(|step_str| step_str.parse::<usize>().ok());
         if let Some(step) = step {
             last_step = Some(last_step.map_or(step, |prev| prev.max(step)));
         }
     }
-    last_step.ok_or_else(|| msg(format!("No checkpoints found in {}", checkpoint_dir.display())))
+    last_step.ok_or_else(|| {
+        msg(format!(
+            "No checkpoints found in {}",
+            checkpoint_dir.display()
+        ))
+    })
 }
 
 /// Build a trainable model (VarMap-backed parameters) from a checkpoint.
@@ -200,7 +249,11 @@ pub fn build_model_for_training(
         .into_iter()
         .map(|(k, v)| {
             let k = k.strip_prefix("_orig_mod.").unwrap_or(&k).to_string();
-            let v = if v.dtype() != DType::F32 { v.to_dtype(DType::F32)? } else { v };
+            let v = if v.dtype() != DType::F32 {
+                v.to_dtype(DType::F32)?
+            } else {
+                v
+            };
             Ok((k, v))
         })
         .collect::<Result<_>>()?;
@@ -230,11 +283,20 @@ pub fn load_optimizer_state(
 ) -> Result<Option<HashMap<String, Tensor>>> {
     let optimizer_path = checkpoint_dir.join(format!("optim_{step:06}_rank0.safetensors"));
     if !optimizer_path.exists() {
-        log0(&format!("Optimizer checkpoint not found: {}", optimizer_path.display()));
+        log0(&format!(
+            "Optimizer checkpoint not found: {}",
+            optimizer_path.display()
+        ));
         return Ok(None);
     }
-    log0(&format!("Loading optimizer state from {}", optimizer_path.display()));
-    Ok(Some(candle_core::safetensors::load(&optimizer_path, device)?))
+    log0(&format!(
+        "Loading optimizer state from {}",
+        optimizer_path.display()
+    ));
+    Ok(Some(candle_core::safetensors::load(
+        &optimizer_path,
+        device,
+    )?))
 }
 
 // -----------------------------------------------------------------------------
@@ -263,7 +325,10 @@ pub fn load_model_from_dir(
         None => find_last_step(&checkpoint_dir)?,
     };
     // build the model
-    log0(&format!("Loading model from {} with step {step}", checkpoint_dir.display()));
+    log0(&format!(
+        "Loading model from {} with step {step}",
+        checkpoint_dir.display()
+    ));
     build_model(&checkpoint_dir, step, device, phase)
 }
 

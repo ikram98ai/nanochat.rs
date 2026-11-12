@@ -81,7 +81,9 @@ pub fn evaluate_core(
             .map_err(|e| msg(format!("Error reading {}: {e}", config_path.display())))?,
     )
     .map_err(msg)?;
-    let tasks = config["icl_tasks"].as_sequence().ok_or_else(|| msg("missing icl_tasks"))?;
+    let tasks = config["icl_tasks"]
+        .as_sequence()
+        .ok_or_else(|| msg("missing icl_tasks"))?;
 
     // Load random baseline values
     let mut random_baselines: HashMap<String, f64> = HashMap::new();
@@ -89,7 +91,10 @@ pub fn evaluate_core(
     let mut lines = csv.lines();
     let header = parse_csv_line(lines.next().ok_or_else(|| msg("empty csv"))?);
     let task_col = header.iter().position(|h| h.trim() == "Eval Task").unwrap();
-    let baseline_col = header.iter().position(|h| h.trim() == "Random baseline").unwrap();
+    let baseline_col = header
+        .iter()
+        .position(|h| h.trim() == "Random baseline")
+        .unwrap();
     for line in lines {
         if line.trim().is_empty() {
             continue;
@@ -113,7 +118,8 @@ pub fn evaluate_core(
         });
         print0(&format!(
             "Evaluating: {label} ({}-shot, type: {})... ",
-            task_meta["num_fewshot"], task_meta["task_type"].as_str().unwrap()
+            task_meta["num_fewshot"],
+            task_meta["task_type"].as_str().unwrap()
         ));
 
         let data_path = data_base_path.join(task["dataset_uri"].as_str().unwrap());
@@ -143,7 +149,10 @@ pub fn evaluate_core(
         centered_results.insert(label, json!(centered_result));
     }
 
-    let core_metric = centered_results.values().map(|v| v.as_f64().unwrap()).sum::<f64>()
+    let core_metric = centered_results
+        .values()
+        .map(|v| v.as_f64().unwrap())
+        .sum::<f64>()
         / centered_results.len() as f64;
     Ok(json!({
         "results": results,

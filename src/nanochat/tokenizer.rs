@@ -63,7 +63,9 @@ fn byte_pair_merge(ranks: &HashMap<Vec<u8>, u32>, piece: &[u8]) -> Vec<(usize, u
 
     let get_rank = |parts: &Vec<(usize, u32)>, i: usize| {
         if (i + 3) < parts.len() {
-            *ranks.get(&piece[parts[i].0..parts[i + 3].0]).unwrap_or(&RANK_MAX)
+            *ranks
+                .get(&piece[parts[i].0..parts[i + 3].0])
+                .unwrap_or(&RANK_MAX)
         } else {
             RANK_MAX
         }
@@ -132,10 +134,14 @@ impl Tokenizer {
         bos_token: &str,
     ) -> Result<Self> {
         let regex = fancy_regex::Regex::new(pattern).map_err(msg)?;
-        let decoder: HashMap<u32, Vec<u8>> =
-            mergeable_ranks.iter().map(|(k, v)| (*v, k.clone())).collect();
-        let special_tokens_decoder: HashMap<u32, String> =
-            special_tokens.iter().map(|(k, v)| (*v, k.clone())).collect();
+        let decoder: HashMap<u32, Vec<u8>> = mergeable_ranks
+            .iter()
+            .map(|(k, v)| (*v, k.clone()))
+            .collect();
+        let special_tokens_decoder: HashMap<u32, String> = special_tokens
+            .iter()
+            .map(|(k, v)| (*v, k.clone()))
+            .collect();
         let bos_token_id = *special_tokens
             .get(bos_token)
             .ok_or_else(|| msg(format!("Failed to find BOS token {bos_token} in tokenizer")))?;
@@ -165,10 +171,16 @@ impl Tokenizer {
                 let file: TokenizerFile = serde_json::from_value(value).map_err(msg)?;
                 let mut mergeable_ranks = HashMap::new();
                 for entry in &file.mergeable_ranks {
-                    let bytes = base64::engine::general_purpose::STANDARD.decode(&entry.bytes).map_err(msg)?;
+                    let bytes = base64::engine::general_purpose::STANDARD
+                        .decode(&entry.bytes)
+                        .map_err(msg)?;
                     mergeable_ranks.insert(bytes, entry.rank);
                 }
-                (file.pattern, mergeable_ranks, file.special_tokens.into_iter().collect())
+                (
+                    file.pattern,
+                    mergeable_ranks,
+                    file.special_tokens.into_iter().collect(),
+                )
             } else {
                 let parts = tokenizer_import::from_hf_json(&value)?;
                 tokenizer_import::validate(&parts)?;
@@ -203,7 +215,11 @@ impl Tokenizer {
                     rank: *rank,
                 })
                 .collect(),
-            special_tokens: self.special_tokens.iter().map(|(name, id)| (name.clone(), *id)).collect(),
+            special_tokens: self
+                .special_tokens
+                .iter()
+                .map(|(name, id)| (name.clone(), *id))
+                .collect(),
         };
         std::fs::write(&path, serde_json::to_string(&file).map_err(msg)?).map_err(msg)?;
         println!("Saved tokenizer to {}", path.display());
@@ -271,7 +287,10 @@ impl Tokenizer {
     ) -> Vec<Vec<u32>> {
         let num_threads = num_threads.clamp(1, texts.len().max(1));
         if num_threads == 1 {
-            return texts.iter().map(|t| self.encode_ordinary(t.as_ref())).collect();
+            return texts
+                .iter()
+                .map(|t| self.encode_ordinary(t.as_ref()))
+                .collect();
         }
         let chunk_size = texts.len().div_ceil(num_threads);
         std::thread::scope(|scope| {
@@ -279,7 +298,10 @@ impl Tokenizer {
                 .chunks(chunk_size)
                 .map(|chunk| {
                     scope.spawn(move || {
-                        chunk.iter().map(|t| self.encode_ordinary(t.as_ref())).collect::<Vec<_>>()
+                        chunk
+                            .iter()
+                            .map(|t| self.encode_ordinary(t.as_ref()))
+                            .collect::<Vec<_>>()
                     })
                 })
                 .collect();
@@ -313,10 +335,11 @@ impl Tokenizer {
     ) -> Result<(Vec<u32>, Vec<u8>)> {
         let mut ids: Vec<u32> = Vec::new();
         let mut mask: Vec<u8> = Vec::new();
-        let add_tokens = |ids: &mut Vec<u32>, mask: &mut Vec<u8>, token_ids: &[u32], mask_val: u8| {
-            ids.extend_from_slice(token_ids);
-            mask.extend(std::iter::repeat(mask_val).take(token_ids.len()));
-        };
+        let add_tokens =
+            |ids: &mut Vec<u32>, mask: &mut Vec<u8>, token_ids: &[u32], mask_val: u8| {
+                ids.extend_from_slice(token_ids);
+                mask.extend(std::iter::repeat(mask_val).take(token_ids.len()));
+            };
 
         let messages = conversation["messages"]
             .as_array()
@@ -329,8 +352,14 @@ impl Tokenizer {
                 messages.get(1).and_then(|m| m["role"].as_str()) == Some("user"),
                 "System message must be followed by a user message"
             );
-            let system_content = messages[0]["content"].as_str().unwrap_or_default().to_string();
-            let user_content = messages[1]["content"].as_str().unwrap_or_default().to_string();
+            let system_content = messages[0]["content"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            let user_content = messages[1]["content"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
             messages[1]["content"] = Value::String(format!("{system_content}\n\n{user_content}"));
             messages.remove(0);
         }
@@ -436,7 +465,10 @@ impl Tokenizer {
             .as_array_mut()
             .ok_or_else(|| msg("Conversation must have a messages list"))?;
         let last_role = messages.last().and_then(|m| m["role"].as_str());
-        assert!(last_role == Some("assistant"), "Last message must be from the Assistant");
+        assert!(
+            last_role == Some("assistant"),
+            "Last message must be from the Assistant"
+        );
         messages.pop(); // remove the last message (of the Assistant)
 
         // Now tokenize the conversation
@@ -505,11 +537,19 @@ impl Tokenizer {
                 break; // no pairs left to merge
             };
             let new_id = (256 + merge_idx) as u32;
-            token_bytes.push([token_bytes[pair.0 as usize].clone(), token_bytes[pair.1 as usize].clone()].concat());
+            token_bytes.push(
+                [
+                    token_bytes[pair.0 as usize].clone(),
+                    token_bytes[pair.1 as usize].clone(),
+                ]
+                .concat(),
+            );
 
             // merge the pair in every word that contains it, updating pair counts
-            let affected: Vec<usize> =
-                pair_words.remove(&pair).map(|s| s.into_iter().collect()).unwrap_or_default();
+            let affected: Vec<usize> = pair_words
+                .remove(&pair)
+                .map(|s| s.into_iter().collect())
+                .unwrap_or_default();
             for w_idx in affected {
                 let (word, count) = &words[w_idx];
                 let count = *count as i64;
@@ -547,8 +587,11 @@ impl Tokenizer {
         }
 
         // construct the tokenizer: mergeable ranks then special tokens at the end
-        let mergeable_ranks: HashMap<Vec<u8>, u32> =
-            token_bytes.into_iter().enumerate().map(|(rank, bytes)| (bytes, rank as u32)).collect();
+        let mergeable_ranks: HashMap<Vec<u8>, u32> = token_bytes
+            .into_iter()
+            .enumerate()
+            .map(|(rank, bytes)| (bytes, rank as u32))
+            .collect();
         let tokens_offset = mergeable_ranks.len() as u32;
         let special_tokens: HashMap<String, u32> = SPECIAL_TOKENS
             .iter()
@@ -573,7 +616,8 @@ impl Tokenizer {
                 if self.special_tokens_decoder.contains_key(&id) {
                     0 // special tokens are not counted
                 } else {
-                    self.decode_single_token_bytes(id).map_or(0, |b| b.len() as i32)
+                    self.decode_single_token_bytes(id)
+                        .map_or(0, |b| b.len() as i32)
                 }
             })
             .collect()

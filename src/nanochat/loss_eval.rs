@@ -21,8 +21,10 @@ pub fn evaluate_bpb(
     token_bytes: &Tensor,
 ) -> Result<f64> {
     // byte length of each token id, pulled to the host once
-    let token_bytes: Vec<i64> =
-        token_bytes.to_device(&Device::Cpu)?.to_dtype(DType::I64)?.to_vec1()?;
+    let token_bytes: Vec<i64> = token_bytes
+        .to_device(&Device::Cpu)?
+        .to_dtype(DType::I64)?
+        .to_vec1()?;
     let mut total_nats = 0f64;
     let mut total_bytes = 0i64;
     for _ in 0..steps {
@@ -33,8 +35,10 @@ pub fn evaluate_bpb(
         let y = y.flatten_all()?.to_dtype(DType::I64)?.to_vec1::<i64>()?;
         // map valid targets to their byte length; any target token < 0 is to be
         // ignored (do NOT index token_bytes with negatives) and contributes 0 bytes
-        let num_bytes: Vec<i64> =
-            y.iter().map(|&t| if t < 0 { 0 } else { token_bytes[t as usize] }).collect();
+        let num_bytes: Vec<i64> = y
+            .iter()
+            .map(|&t| if t < 0 { 0 } else { token_bytes[t as usize] })
+            .collect();
         // tokens with 0 bytes (special or ignored) contribute zero loss
         let byte_mask: Vec<f32> = num_bytes.iter().map(|&b| (b > 0) as u8 as f32).collect();
         let byte_mask = Tensor::from_vec(byte_mask, num_bytes.len(), loss2d.device())?;

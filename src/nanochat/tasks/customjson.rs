@@ -27,27 +27,42 @@ impl CustomJSON {
                 if line.is_empty() {
                     continue; // skip empty lines
                 }
-                let messages: Value =
-                    serde_json::from_str(line).map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+                let messages: Value = serde_json::from_str(line)
+                    .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
                 // Validate the conversation structure
                 let list = messages.as_array().expect("Expected list of messages");
-                assert!(list.len() >= 2, "Conversation must have at least 2 messages");
+                assert!(
+                    list.len() >= 2,
+                    "Conversation must have at least 2 messages"
+                );
                 // Validate message structure and alternating roles
                 for (i, message) in list.iter().enumerate() {
-                    assert!(message.get("role").is_some(), "Message {i} missing 'role' field");
-                    assert!(message.get("content").is_some(), "Message {i} missing 'content' field");
+                    assert!(
+                        message.get("role").is_some(),
+                        "Message {i} missing 'role' field"
+                    );
+                    assert!(
+                        message.get("content").is_some(),
+                        "Message {i} missing 'content' field"
+                    );
                     let expected_role = if i % 2 == 0 { "user" } else { "assistant" };
                     assert!(
                         message["role"] == expected_role,
                         "Message {i} has role {} but should be {expected_role}",
                         message["role"]
                     );
-                    assert!(message["content"].is_string(), "Message {i} content must be a string");
+                    assert!(
+                        message["content"].is_string(),
+                        "Message {i} content must be a string"
+                    );
                 }
                 conversations.push(messages);
             }
         }
-        Ok(Self { slice, conversations })
+        Ok(Self {
+            slice,
+            conversations,
+        })
     }
 }
 

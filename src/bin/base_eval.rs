@@ -12,7 +12,9 @@ use clap::Parser;
 
 use nanochat::base_eval::evaluate_core;
 use nanochat::checkpoint_manager::load_model;
-use nanochat::common::{autodetect_device_type, compute_init, get_base_dir, print0, setup_default_logging};
+use nanochat::common::{
+    autodetect_device_type, compute_init, get_base_dir, print0, setup_default_logging,
+};
 use nanochat::dataloader::DataLoader;
 use nanochat::engine::Engine;
 use nanochat::loss_eval::evaluate_bpb;
@@ -69,10 +71,16 @@ fn main() -> anyhow::Result<()> {
         args.device_type.clone()
     };
     let (_ddp, _rank, _local, ddp_world_size, device) = compute_init(&device_type)?;
-    let (model, tokenizer, meta) =
-        load_model("base", &device, "eval", args.model_tag.as_deref(), args.step)?;
+    let (model, tokenizer, meta) = load_model(
+        "base",
+        &device,
+        "eval",
+        args.model_tag.as_deref(),
+        args.step,
+    )?;
     let sequence_len = meta["model_config"]["sequence_len"].as_u64().unwrap() as usize;
-    let token_bytes = Tensor::from_vec(tokenizer.token_bytes(), tokenizer.get_vocab_size(), &device)?;
+    let token_bytes =
+        Tensor::from_vec(tokenizer.token_bytes(), tokenizer.get_vocab_size(), &device)?;
     let model_name = format!("base_model (step {})", meta["step"]);
     let model_slug = format!("base_model_{:06}", meta["step"].as_u64().unwrap_or(0));
 
@@ -127,8 +135,15 @@ fn main() -> anyhow::Result<()> {
         let steps = split_tokens / tokens_per_step;
         for split_name in ["train", "val"] {
             let mut loader = DataLoader::new(
-                &tokenizer, args.device_batch_size, sequence_len, split_name, None, 128, &device,
-                None, 1000,
+                &tokenizer,
+                args.device_batch_size,
+                sequence_len,
+                split_name,
+                None,
+                128,
+                &device,
+                None,
+                1000,
             )?;
             let mut batches =
                 std::iter::from_fn(|| Some(loader.next_batch().map(|(x, y, _)| (x, y))));
@@ -145,7 +160,9 @@ fn main() -> anyhow::Result<()> {
         let core_results = evaluate_core(&model, &tokenizer, &device, args.max_per_task)?;
 
         // Write CSV output
-        let output_csv_path = get_base_dir().join("base_eval").join(format!("{model_slug}.csv"));
+        let output_csv_path = get_base_dir()
+            .join("base_eval")
+            .join(format!("{model_slug}.csv"));
         std::fs::create_dir_all(output_csv_path.parent().unwrap())?;
         let mut csv = format!("{:<35}, {:<10}, {:<10}\n", "Task", "Accuracy", "Centered");
         for (label, acc) in core_results["results"].as_object().unwrap() {
@@ -156,9 +173,15 @@ fn main() -> anyhow::Result<()> {
             ));
         }
         let core_metric = core_results["core_metric"].as_f64().unwrap();
-        csv.push_str(&format!("{:<35}, {:<10}, {core_metric:<10.6}\n", "CORE", ""));
+        csv.push_str(&format!(
+            "{:<35}, {:<10}, {core_metric:<10.6}\n",
+            "CORE", ""
+        ));
         std::fs::write(&output_csv_path, csv)?;
-        print0(&format!("\nResults written to: {}", output_csv_path.display()));
+        print0(&format!(
+            "\nResults written to: {}",
+            output_csv_path.display()
+        ));
         print0(&format!("CORE metric: {core_metric:.4}"));
     }
 

@@ -33,7 +33,10 @@ struct MockModel {
 
 impl MockModel {
     fn new() -> Self {
-        Self { config: mock_config(), device: Device::Cpu }
+        Self {
+            config: mock_config(),
+            device: Device::Cpu,
+        }
     }
 }
 
@@ -86,7 +89,11 @@ impl EngineTokenizer for ByteTokenizer {
         s.bytes().map(|b| b as u32).collect()
     }
     fn decode(&self, tokens: &[u32]) -> String {
-        let bytes: Vec<u8> = tokens.iter().filter(|&&t| t < 256).map(|&t| t as u8).collect();
+        let bytes: Vec<u8> = tokens
+            .iter()
+            .filter(|&&t| t < 256)
+            .map(|&t| t as u8)
+            .collect();
         String::from_utf8_lossy(&bytes).into_owned()
     }
 }
@@ -97,8 +104,15 @@ const PROMPT: [u32; 6] = [261, 72, 101, 108, 108, 111]; // <bos> + "Hello"
 fn test_kv_cache_basic() {
     let (batch_size, num_heads, seq_len, head_dim, num_layers) = (2, 3, 64, 5, 6);
     let kv_cache = KVCache::new(
-        batch_size, num_heads, seq_len, head_dim, num_layers, &Device::Cpu, DType::F32,
-    ).unwrap();
+        batch_size,
+        num_heads,
+        seq_len,
+        head_dim,
+        num_layers,
+        &Device::Cpu,
+        DType::F32,
+    )
+    .unwrap();
 
     // Check initial state
     assert_eq!(kv_cache.get_pos(), 0);
@@ -121,18 +135,43 @@ fn test_kv_cache_basic() {
 fn test_kv_cache_prefill() {
     let (batch_size, num_heads, head_dim, num_layers) = (1, 4, 8, 2);
     let src_cache = KVCache::new(
-        batch_size, num_heads, 32, head_dim, num_layers, &Device::Cpu, DType::F32,
-    ).unwrap();
+        batch_size,
+        num_heads,
+        32,
+        head_dim,
+        num_layers,
+        &Device::Cpu,
+        DType::F32,
+    )
+    .unwrap();
     // Write some data to source cache
     let (k0, v0) = src_cache.get_layer_cache(0);
-    k0.slice_set(&Tensor::ones((1, 16, num_heads, head_dim), DType::F32, &Device::Cpu).unwrap(), 1, 0).unwrap();
-    v0.slice_set(&(Tensor::ones((1, 16, num_heads, head_dim), DType::F32, &Device::Cpu).unwrap() * 2.0).unwrap(), 1, 0).unwrap();
+    k0.slice_set(
+        &Tensor::ones((1, 16, num_heads, head_dim), DType::F32, &Device::Cpu).unwrap(),
+        1,
+        0,
+    )
+    .unwrap();
+    v0.slice_set(
+        &(Tensor::ones((1, 16, num_heads, head_dim), DType::F32, &Device::Cpu).unwrap() * 2.0)
+            .unwrap(),
+        1,
+        0,
+    )
+    .unwrap();
     src_cache.advance(16);
 
     // Create destination cache with larger seq_len
     let dst_cache = KVCache::new(
-        batch_size, num_heads, 64, head_dim, num_layers, &Device::Cpu, DType::F32,
-    ).unwrap();
+        batch_size,
+        num_heads,
+        64,
+        head_dim,
+        num_layers,
+        &Device::Cpu,
+        DType::F32,
+    )
+    .unwrap();
     dst_cache.prefill(&src_cache).unwrap();
 
     // Check position was copied
@@ -140,8 +179,20 @@ fn test_kv_cache_prefill() {
 
     // Check data was copied
     let (k0, v0) = dst_cache.get_layer_cache(0);
-    let k_sum = k0.narrow(1, 0, 16).unwrap().sum_all().unwrap().to_scalar::<f32>().unwrap();
-    let v_sum = v0.narrow(1, 0, 16).unwrap().sum_all().unwrap().to_scalar::<f32>().unwrap();
+    let k_sum = k0
+        .narrow(1, 0, 16)
+        .unwrap()
+        .sum_all()
+        .unwrap()
+        .to_scalar::<f32>()
+        .unwrap();
+    let v_sum = v0
+        .narrow(1, 0, 16)
+        .unwrap()
+        .sum_all()
+        .unwrap()
+        .to_scalar::<f32>()
+        .unwrap();
     assert_eq!(k_sum, (16 * num_heads * head_dim) as f32);
     assert_eq!(v_sum, (2 * 16 * num_heads * head_dim) as f32);
 }
@@ -156,7 +207,9 @@ fn test_multi_sample_first_token_diversity() {
 
     let num_samples = 16;
     let mut first_tokens = Vec::new();
-    let stream = engine.generate(&PROMPT, num_samples, Some(1), 1.0, None, 42).unwrap();
+    let stream = engine
+        .generate(&PROMPT, num_samples, Some(1), 1.0, None, 42)
+        .unwrap();
     for step in stream {
         let (token_column, _) = step.unwrap();
         first_tokens = token_column; // first (and only) yield
@@ -178,10 +231,19 @@ fn test_seed_reproducibility() {
     let engine = Engine::new(&model, &tokenizer);
 
     for seed in [1, 42, 123, 999] {
-        let (r1, _) = engine.generate_batch(&PROMPT, 1, Some(5), 1.0, None, seed).unwrap();
-        let (r2, _) = engine.generate_batch(&PROMPT, 1, Some(5), 1.0, None, seed).unwrap();
-        let (r3, _) = engine.generate_batch(&PROMPT, 1, Some(5), 1.0, None, seed).unwrap();
-        assert!(r1 == r2 && r2 == r3, "Same seed must produce identical output for the same prompt.");
+        let (r1, _) = engine
+            .generate_batch(&PROMPT, 1, Some(5), 1.0, None, seed)
+            .unwrap();
+        let (r2, _) = engine
+            .generate_batch(&PROMPT, 1, Some(5), 1.0, None, seed)
+            .unwrap();
+        let (r3, _) = engine
+            .generate_batch(&PROMPT, 1, Some(5), 1.0, None, seed)
+            .unwrap();
+        assert!(
+            r1 == r2 && r2 == r3,
+            "Same seed must produce identical output for the same prompt."
+        );
     }
 }
 
@@ -192,10 +254,19 @@ fn test_temperature_zero_determinism() {
     let tokenizer = ByteTokenizer::new();
     let engine = Engine::new(&model, &tokenizer);
 
-    let (r1, _) = engine.generate_batch(&PROMPT, 1, Some(5), 0.0, None, 1).unwrap();
-    let (r2, _) = engine.generate_batch(&PROMPT, 1, Some(5), 0.0, None, 42).unwrap();
-    let (r3, _) = engine.generate_batch(&PROMPT, 1, Some(5), 0.0, None, 123).unwrap();
-    assert!(r1 == r2 && r2 == r3, "Temperature=0 must give the same output regardless of seed.");
+    let (r1, _) = engine
+        .generate_batch(&PROMPT, 1, Some(5), 0.0, None, 1)
+        .unwrap();
+    let (r2, _) = engine
+        .generate_batch(&PROMPT, 1, Some(5), 0.0, None, 42)
+        .unwrap();
+    let (r3, _) = engine
+        .generate_batch(&PROMPT, 1, Some(5), 0.0, None, 123)
+        .unwrap();
+    assert!(
+        r1 == r2 && r2 == r3,
+        "Temperature=0 must give the same output regardless of seed."
+    );
 }
 
 /// Generation stops at max_tokens limit.
@@ -206,7 +277,9 @@ fn test_max_tokens_respected() {
     let engine = Engine::new(&model, &tokenizer);
 
     for max_tokens in [1, 4, 16, 64] {
-        let (results, _) = engine.generate_batch(&PROMPT, 1, Some(max_tokens), 1.0, None, 42).unwrap();
+        let (results, _) = engine
+            .generate_batch(&PROMPT, 1, Some(max_tokens), 1.0, None, 42)
+            .unwrap();
         let num_generated = results[0].len() - PROMPT.len();
         assert!(
             num_generated <= max_tokens,
@@ -223,7 +296,9 @@ fn test_num_samples_count() {
     let engine = Engine::new(&model, &tokenizer);
 
     for num_samples in [1, 4, 16, 64] {
-        let (results, _) = engine.generate_batch(&PROMPT, num_samples, Some(3), 1.0, None, 42).unwrap();
+        let (results, _) = engine
+            .generate_batch(&PROMPT, num_samples, Some(3), 1.0, None, 42)
+            .unwrap();
         assert_eq!(results.len(), num_samples);
     }
 }
@@ -237,10 +312,15 @@ fn test_different_seeds_introduce_variation() {
 
     let mut outputs = std::collections::HashSet::new();
     for seed in [1, 42, 123, 999, 1000, 1001, 1002, 1003, 1004, 1005] {
-        let (results, _) = engine.generate_batch(&PROMPT, 1, Some(5), 1.0, None, seed).unwrap();
+        let (results, _) = engine
+            .generate_batch(&PROMPT, 1, Some(5), 1.0, None, seed)
+            .unwrap();
         outputs.insert(results[0].clone());
     }
-    assert!(outputs.len() > 1, "All seeds produced the same output which is highly improbable.");
+    assert!(
+        outputs.len() > 1,
+        "All seeds produced the same output which is highly improbable."
+    );
 }
 
 /// The calculator tool must reproduce the expected results in tests/data
@@ -298,7 +378,13 @@ fn test_tool_use_forcing() {
     let python_end = 257;
     let output_start = 258;
     let output_end = 259;
-    let script = vec![python_start, b'1' as u32, b'+' as u32, b'2' as u32, python_end];
+    let script = vec![
+        python_start,
+        b'1' as u32,
+        b'+' as u32,
+        b'2' as u32,
+        python_end,
+    ];
     let model = ScriptedModel {
         config: mock_config(),
         device: Device::Cpu,
@@ -306,7 +392,9 @@ fn test_tool_use_forcing() {
         step: std::cell::Cell::new(0),
     };
     let engine = Engine::new(&model, &tokenizer);
-    let stream = engine.generate(&PROMPT, 1, Some(10), 0.0, None, 42).unwrap();
+    let stream = engine
+        .generate(&PROMPT, 1, Some(10), 0.0, None, 42)
+        .unwrap();
     let mut tokens = Vec::new();
     let mut masks = Vec::new();
     for step in stream {
@@ -316,8 +404,14 @@ fn test_tool_use_forcing() {
     }
     // sampled: python block; forced: <|output_start|>"3"<|output_end|>
     let expected_prefix = vec![
-        python_start, b'1' as u32, b'+' as u32, b'2' as u32, python_end,
-        output_start, b'3' as u32, output_end,
+        python_start,
+        b'1' as u32,
+        b'+' as u32,
+        b'2' as u32,
+        python_end,
+        output_start,
+        b'3' as u32,
+        output_end,
     ];
     assert_eq!(&tokens[..8], &expected_prefix[..]);
     assert_eq!(&masks[..8], &[1, 1, 1, 1, 1, 0, 0, 0]);

@@ -80,7 +80,9 @@ fn python_str_literal(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 || c as u32 == 0x7f => out.push_str(&format!("\\x{:02x}", c as u32)),
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+                out.push_str(&format!("\\x{:02x}", c as u32))
+            }
             c if c.is_ascii() => out.push(c),
             c if (c as u32) <= 0xffff => out.push_str(&format!("\\u{:04x}", c as u32)),
             c => out.push_str(&format!("\\U{:08x}", c as u32)),
@@ -94,7 +96,9 @@ fn python_str_literal(s: &str) -> String {
 /// scrubbed environment, so the lookup has to happen here).
 fn find_python() -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).map(|dir| dir.join("python3")).find(|p| p.is_file())
+    std::env::split_paths(&path)
+        .map(|dir| dir.join("python3"))
+        .find(|p| p.is_file())
 }
 
 /// A fresh private directory for one execution; removed on drop.
@@ -197,8 +201,18 @@ pub fn execute_code_with_limits(
             String::from_utf8_lossy(&buf).into_owned()
         })
     };
-    let stdout_reader = drain(child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
-    let stderr_reader = drain(child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+    let stdout_reader = drain(
+        child
+            .stdout
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let stderr_reader = drain(
+        child
+            .stderr
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
 
     let deadline = Instant::now() + Duration::from_secs_f64(timeout_secs);
     let status = loop {
@@ -234,8 +248,22 @@ pub fn execute_code_with_limits(
     let error = if success {
         None
     } else {
-        Some(stderr.trim().lines().last().unwrap_or("Execution failed").to_string())
+        Some(
+            stderr
+                .trim()
+                .lines()
+                .last()
+                .unwrap_or("Execution failed")
+                .to_string(),
+        )
     };
     let memory_exceeded = stderr.contains("MemoryError");
-    ExecutionResult { success, stdout, stderr, error, timeout: false, memory_exceeded }
+    ExecutionResult {
+        success,
+        stdout,
+        stderr,
+        error,
+        timeout: false,
+        memory_exceeded,
+    }
 }

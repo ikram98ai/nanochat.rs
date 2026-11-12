@@ -28,7 +28,7 @@ pub fn parse_answer_parts(answer: &str) -> Vec<Value> {
         // regular text in between tool calls (empty segments included)
         parts.push(json!({"type": "text", "text": &answer[prev_end..m.start()]}));
         let inner = &answer[m.start() + 2..m.end() - 2]; // remove << >>
-        // split on the last = to get expression and result
+                                                         // split on the last = to get expression and result
         let (expr, result) = match inner.rfind('=') {
             Some(pos) => (&inner[..pos], &inner[pos + 1..]),
             None => (inner, ""),
@@ -48,8 +48,14 @@ pub struct GSM8K {
 
 impl GSM8K {
     pub fn new(subset: &str, split: &str, slice: Slice) -> Result<Self> {
-        assert!(subset == "main" || subset == "socratic", "GSM8K subset must be main|socratic");
-        assert!(split == "train" || split == "test", "GSM8K split must be train|test");
+        assert!(
+            subset == "main" || subset == "socratic",
+            "GSM8K subset must be main|socratic"
+        );
+        assert!(
+            split == "train" || split == "test",
+            "GSM8K split must be train|test"
+        );
         let rows = load_shuffled("openai/gsm8k", subset, split)?;
         Ok(Self::from_rows(rows, slice))
     }

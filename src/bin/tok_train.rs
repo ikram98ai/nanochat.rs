@@ -36,18 +36,20 @@ fn main() -> anyhow::Result<()> {
     let mut nchars = 0usize;
     let mut done = false;
     let batches = parquets_iter_batched("train", 0, 1)?;
-    let text_iter = batches.flat_map(|batch| batch.unwrap_or_default()).map_while(move |doc| {
-        if done {
-            return None;
-        }
-        let mut doc_text = doc;
-        if doc_text.chars().count() > args.doc_cap {
-            doc_text = doc_text.chars().take(args.doc_cap).collect();
-        }
-        nchars += doc_text.chars().count();
-        done = nchars > args.max_chars; // the current document is still included
-        Some(doc_text)
-    });
+    let text_iter = batches
+        .flat_map(|batch| batch.unwrap_or_default())
+        .map_while(move |doc| {
+            if done {
+                return None;
+            }
+            let mut doc_text = doc;
+            if doc_text.chars().count() > args.doc_cap {
+                doc_text = doc_text.chars().take(args.doc_cap).collect();
+            }
+            nchars += doc_text.chars().count();
+            done = nchars > args.max_chars; // the current document is still included
+            Some(doc_text)
+        });
 
     // Train the tokenizer
     let t0 = std::time::Instant::now();
@@ -68,11 +70,21 @@ fn main() -> anyhow::Result<()> {
     // token id -> byte length mapping stats (the bits-per-byte normalization);
     // the Rust port computes token_bytes from the tokenizer on the fly.
     let token_bytes = tokenizer.token_bytes();
-    let nonzero: Vec<f64> = token_bytes.iter().filter(|&&b| b > 0).map(|&b| b as f64).collect();
+    let nonzero: Vec<f64> = token_bytes
+        .iter()
+        .filter(|&&b| b > 0)
+        .map(|&b| b as f64)
+        .collect();
     let mean = nonzero.iter().sum::<f64>() / nonzero.len() as f64;
     let var = nonzero.iter().map(|b| (b - mean).powi(2)).sum::<f64>() / (nonzero.len() - 1) as f64;
-    println!("token_bytes_min: {}", nonzero.iter().cloned().fold(f64::INFINITY, f64::min));
-    println!("token_bytes_max: {}", nonzero.iter().cloned().fold(0.0, f64::max));
+    println!(
+        "token_bytes_min: {}",
+        nonzero.iter().cloned().fold(f64::INFINITY, f64::min)
+    );
+    println!(
+        "token_bytes_max: {}",
+        nonzero.iter().cloned().fold(0.0, f64::max)
+    );
     println!("token_bytes_mean: {mean:.4}");
     println!("token_bytes_std: {:.4}", var.sqrt());
     Ok(())

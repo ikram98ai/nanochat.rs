@@ -53,8 +53,13 @@ fn main() -> anyhow::Result<()> {
         args.device_type.clone()
     };
     let (_ddp, _rank, _local_rank, _world_size, device) = compute_init(&device_type)?;
-    let (model, tokenizer, _meta) =
-        load_model(&args.source, &device, "eval", args.model_tag.as_deref(), args.step)?;
+    let (model, tokenizer, _meta) = load_model(
+        &args.source,
+        &device,
+        "eval",
+        args.model_tag.as_deref(),
+        args.step,
+    )?;
 
     // Special tokens for the chat state machine
     let bos = tokenizer.get_bos_token_id();
@@ -118,8 +123,8 @@ fn main() -> anyhow::Result<()> {
         std::io::stdout().flush()?;
         let stream = engine.generate(
             &conversation_tokens,
-            1,            // num_samples
-            Some(256),    // max_tokens
+            1,         // num_samples
+            Some(256), // max_tokens
             args.temperature,
             Some(args.top_k),
             42,

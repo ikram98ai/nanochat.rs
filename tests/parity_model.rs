@@ -19,7 +19,9 @@ use nanochat::flash_attention::{flash_attn_func, flash_attn_with_kvcache};
 use nanochat::gpt::{apply_rotary_emb, norm, GPTConfig, GPT};
 
 fn data_dir() -> PathBuf {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests").join("data");
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("data");
     assert!(dir.join("meta.json").exists(), "tests/data is generated, not checked in: run `cargo run --release --example gen_test_data` first");
     dir
 }
@@ -44,18 +46,38 @@ fn load_model() -> GPT {
 
 #[track_caller]
 fn assert_close(actual: &Tensor, expected: &Tensor, atol: f64, name: &str) {
-    let actual = actual.flatten_all().unwrap().to_dtype(DType::F32).unwrap().to_vec1::<f32>().unwrap();
-    let expected = expected.flatten_all().unwrap().to_dtype(DType::F32).unwrap().to_vec1::<f32>().unwrap();
+    let actual = actual
+        .flatten_all()
+        .unwrap()
+        .to_dtype(DType::F32)
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap();
+    let expected = expected
+        .flatten_all()
+        .unwrap()
+        .to_dtype(DType::F32)
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap();
     assert_eq!(actual.len(), expected.len(), "{name}: length mismatch");
     let mut max_diff = 0f64;
     for (a, e) in actual.iter().zip(expected.iter()) {
         max_diff = max_diff.max((a - e).abs() as f64);
     }
-    assert!(max_diff <= atol, "{name}: max_diff={max_diff:.3e} > atol={atol:.1e}");
+    assert!(
+        max_diff <= atol,
+        "{name}: max_diff={max_diff:.3e} > atol={atol:.1e}"
+    );
 }
 
 fn meta_u32s(meta: &serde_json::Value, key: &str) -> Vec<u32> {
-    meta[key].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as u32).collect()
+    meta[key]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as u32)
+        .collect()
 }
 
 // -----------------------------------------------------------------------------
@@ -74,8 +96,18 @@ fn test_rotary_embeddings() {
     // the precomputed cos/sin tables must match the model's
     let model = load_model();
     let (cos, sin) = model.rotary_cos_sin();
-    assert_close(&cos.narrow(1, 0, 8).unwrap(), &fx["rotary_cos"], 1e-6, "rotary cos");
-    assert_close(&sin.narrow(1, 0, 8).unwrap(), &fx["rotary_sin"], 1e-6, "rotary sin");
+    assert_close(
+        &cos.narrow(1, 0, 8).unwrap(),
+        &fx["rotary_cos"],
+        1e-6,
+        "rotary cos",
+    );
+    assert_close(
+        &sin.narrow(1, 0, 8).unwrap(),
+        &fx["rotary_sin"],
+        1e-6,
+        "rotary sin",
+    );
     // and applying them must match
     let out = apply_rotary_emb(&fx["rotary_in"], &fx["rotary_cos"], &fx["rotary_sin"]).unwrap();
     assert_close(&out, &fx["rotary_out"], 1e-6, "apply_rotary_emb");
@@ -96,20 +128,41 @@ fn test_attention_with_kvcache() {
     let cache = KVCache::new(1, 2, 20, 16, 1, &Device::Cpu, DType::F32).unwrap();
     // prefill of 12 tokens
     let out = flash_attn_with_kvcache(
-        &fx["kvattn_q_prefill"], &cache, 0, &fx["kvattn_k_prefill"], &fx["kvattn_v_prefill"], true, (4, 0),
-    ).unwrap();
+        &fx["kvattn_q_prefill"],
+        &cache,
+        0,
+        &fx["kvattn_k_prefill"],
+        &fx["kvattn_v_prefill"],
+        true,
+        (4, 0),
+    )
+    .unwrap();
     assert_close(&out, &fx["kvattn_prefill_out"], 1e-5, "kvattn prefill");
     cache.advance(12);
     // chunk of 5 tokens (Tq != Tk path)
     let out = flash_attn_with_kvcache(
-        &fx["kvattn_q_chunk"], &cache, 0, &fx["kvattn_k_chunk"], &fx["kvattn_v_chunk"], true, (4, 0),
-    ).unwrap();
+        &fx["kvattn_q_chunk"],
+        &cache,
+        0,
+        &fx["kvattn_k_chunk"],
+        &fx["kvattn_v_chunk"],
+        true,
+        (4, 0),
+    )
+    .unwrap();
     assert_close(&out, &fx["kvattn_chunk_out"], 1e-5, "kvattn chunk");
     cache.advance(5);
     // single token decode
     let out = flash_attn_with_kvcache(
-        &fx["kvattn_q_decode"], &cache, 0, &fx["kvattn_k_decode"], &fx["kvattn_v_decode"], true, (4, 0),
-    ).unwrap();
+        &fx["kvattn_q_decode"],
+        &cache,
+        0,
+        &fx["kvattn_k_decode"],
+        &fx["kvattn_v_decode"],
+        true,
+        (4, 0),
+    )
+    .unwrap();
     assert_close(&out, &fx["kvattn_decode_out"], 1e-5, "kvattn decode");
     cache.advance(1);
     // the final cache contents must match too
@@ -126,7 +179,9 @@ fn test_window_sizes_flops_and_param_counts() {
     let meta = load_meta();
     let model = load_model();
     let expected_windows: Vec<(i64, i64)> = meta["window_sizes"]
-        .as_array().unwrap().iter()
+        .as_array()
+        .unwrap()
+        .iter()
         .map(|w| (w[0].as_i64().unwrap(), w[1].as_i64().unwrap()))
         .collect();
     assert_eq!(model.window_sizes, expected_windows, "window_sizes");
@@ -164,9 +219,13 @@ fn test_forward_training_mode() {
 fn test_cross_entropy_loss() {
     let fx = load_fixtures();
     let model = load_model();
-    let loss = model.forward(&fx["fw1_ids"], Some(&fx["loss_targets"]), None, "mean").unwrap();
+    let loss = model
+        .forward(&fx["fw1_ids"], Some(&fx["loss_targets"]), None, "mean")
+        .unwrap();
     assert_close(&loss, &fx["loss_mean"], 1e-5, "loss mean");
-    let loss = model.forward(&fx["fw1_ids"], Some(&fx["loss_targets"]), None, "sum").unwrap();
+    let loss = model
+        .forward(&fx["fw1_ids"], Some(&fx["loss_targets"]), None, "sum")
+        .unwrap();
     assert_close(&loss, &fx["loss_sum"], 1e-4, "loss sum");
 }
 
@@ -179,22 +238,42 @@ fn run_kv_decode_case(prefix: &str, cache_len: usize, n_steps: usize) {
     let model = load_model();
     let m = &model.config;
     let kv = KVCache::new(
-        1, m.n_kv_head, cache_len, m.n_embd / m.n_head, m.n_layer, &Device::Cpu, DType::F32,
-    ).unwrap();
+        1,
+        m.n_kv_head,
+        cache_len,
+        m.n_embd / m.n_head,
+        m.n_layer,
+        &Device::Cpu,
+        DType::F32,
+    )
+    .unwrap();
     let prompt = &fx[&format!("{prefix}_prompt")];
     let mut logits = model.forward(prompt, None, Some(&kv), "mean").unwrap();
     let t = logits.dim(1).unwrap();
     let mut last = logits.narrow(1, t - 1, 1).unwrap().squeeze(1).unwrap();
-    assert_close(&last, &fx[&format!("{prefix}_prefill_logits")], 1e-5, "prefill logits");
+    assert_close(
+        &last,
+        &fx[&format!("{prefix}_prefill_logits")],
+        1e-5,
+        "prefill logits",
+    );
     let expected_tokens = meta_u32s(&meta, &format!("{prefix}_tokens"));
     for step in 0..n_steps {
         let next_tok = last.argmax(1).unwrap().to_vec1::<u32>().unwrap()[0];
-        assert_eq!(next_tok, expected_tokens[step], "{prefix} token at step {step}");
+        assert_eq!(
+            next_tok, expected_tokens[step],
+            "{prefix} token at step {step}"
+        );
         let ids = Tensor::from_vec(vec![next_tok as i64], (1, 1), &Device::Cpu).unwrap();
         logits = model.forward(&ids, None, Some(&kv), "mean").unwrap();
         last = logits.narrow(1, 0, 1).unwrap().squeeze(1).unwrap();
     }
-    assert_close(&last, &fx[&format!("{prefix}_final_logits")], 1e-5, "final logits");
+    assert_close(
+        &last,
+        &fx[&format!("{prefix}_final_logits")],
+        1e-5,
+        "final logits",
+    );
 }
 
 #[test]
@@ -235,7 +314,10 @@ struct SpecialOnlyTokenizer;
 
 impl EngineTokenizer for SpecialOnlyTokenizer {
     fn encode_special(&self, text: &str) -> u32 {
-        let idx = nanochat::tokenizer::SPECIAL_TOKENS.iter().position(|s| *s == text).unwrap();
+        let idx = nanochat::tokenizer::SPECIAL_TOKENS
+            .iter()
+            .position(|s| *s == text)
+            .unwrap();
         500 + idx as u32
     }
     fn get_bos_token_id(&self) -> u32 {
@@ -258,15 +340,33 @@ fn test_engine_generate() {
     let prompt = meta_u32s(&meta, "engine_prompt");
 
     let expected_columns: Vec<Vec<u32>> = meta["engine_token_columns"]
-        .as_array().unwrap().iter()
-        .map(|col| col.as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as u32).collect())
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|col| {
+            col.as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_u64().unwrap() as u32)
+                .collect()
+        })
         .collect();
     let expected_masks: Vec<Vec<u8>> = meta["engine_token_masks"]
-        .as_array().unwrap().iter()
-        .map(|col| col.as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as u8).collect())
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|col| {
+            col.as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_u64().unwrap() as u8)
+                .collect()
+        })
         .collect();
 
-    let stream = engine.generate(&prompt, 2, Some(10), 0.0, None, 42).unwrap();
+    let stream = engine
+        .generate(&prompt, 2, Some(10), 0.0, None, 42)
+        .unwrap();
     let mut columns = Vec::new();
     let mut masks = Vec::new();
     for step in stream {
@@ -279,14 +379,32 @@ fn test_engine_generate() {
 
     // batch interface returns the same content with prompt prefixes
     let expected_results: Vec<Vec<u32>> = meta["engine_batch_results"]
-        .as_array().unwrap().iter()
-        .map(|row| row.as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as u32).collect())
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            row.as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_u64().unwrap() as u32)
+                .collect()
+        })
         .collect();
     let expected_batch_masks: Vec<Vec<u8>> = meta["engine_batch_masks"]
-        .as_array().unwrap().iter()
-        .map(|row| row.as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as u8).collect())
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            row.as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_u64().unwrap() as u8)
+                .collect()
+        })
         .collect();
-    let (results, rmasks) = engine.generate_batch(&prompt, 2, Some(10), 0.0, None, 42).unwrap();
+    let (results, rmasks) = engine
+        .generate_batch(&prompt, 2, Some(10), 0.0, None, 42)
+        .unwrap();
     assert_eq!(results, expected_results, "engine batch results");
     assert_eq!(rmasks, expected_batch_masks, "engine batch masks");
 }
@@ -298,8 +416,14 @@ fn test_engine_generate() {
 fn test_sample_next_token_argmax_and_seeded() {
     let logits = Tensor::from_vec(vec![0.1f32, 2.0, -1.0, 0.5], (1, 4), &Device::Cpu).unwrap();
     let mut rng = StdRng::seed_from_u64(42);
-    assert_eq!(sample_next_token(&logits, &mut rng, 0.0, None).unwrap(), vec![1]);
-    assert_eq!(sample_next_token(&logits, &mut rng, 0.0, Some(2)).unwrap(), vec![1]);
+    assert_eq!(
+        sample_next_token(&logits, &mut rng, 0.0, None).unwrap(),
+        vec![1]
+    );
+    assert_eq!(
+        sample_next_token(&logits, &mut rng, 0.0, Some(2)).unwrap(),
+        vec![1]
+    );
     // seeded sampling is reproducible
     let mut rng1 = StdRng::seed_from_u64(7);
     let mut rng2 = StdRng::seed_from_u64(7);

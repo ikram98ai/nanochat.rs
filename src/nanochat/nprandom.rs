@@ -33,7 +33,9 @@ fn seed_sequence_state(seed: u64) -> [u64; 4] {
         value ^ (value >> XSHIFT)
     };
     let mix = |x: u32, y: u32| -> u32 {
-        let result = MIX_MULT_L.wrapping_mul(x).wrapping_sub(MIX_MULT_R.wrapping_mul(y));
+        let result = MIX_MULT_L
+            .wrapping_mul(x)
+            .wrapping_sub(MIX_MULT_R.wrapping_mul(y));
         result ^ (result >> XSHIFT)
     };
 
@@ -81,7 +83,11 @@ impl Pcg64 {
         let s = seed_sequence_state(seed);
         let initstate = (s[0] as u128) << 64 | s[1] as u128;
         let initseq = (s[2] as u128) << 64 | s[3] as u128;
-        let mut rng = Self { state: 0, inc: (initseq << 1) | 1, buffered_u32: None };
+        let mut rng = Self {
+            state: 0,
+            inc: (initseq << 1) | 1,
+            buffered_u32: None,
+        };
         rng.step();
         rng.state = rng.state.wrapping_add(initstate);
         rng.step();
@@ -150,11 +156,19 @@ mod tests {
     fn test_seed_sequence_and_raw_stream() {
         assert_eq!(
             seed_sequence_state(42),
-            [0x9f1e2e6dcd540ab7, 0xd57873dc79fb94b6, 0x7d282a1b64d420b7, 0x336579714692d5ff]
+            [
+                0x9f1e2e6dcd540ab7,
+                0xd57873dc79fb94b6,
+                0x7d282a1b64d420b7,
+                0x336579714692d5ff
+            ]
         );
         let mut rng = Pcg64::new(42);
         let raw: Vec<u64> = (0..3).map(|_| rng.next_u64()).collect();
-        assert_eq!(raw, [0xc621fbcd16d92688, 0x705a5661a791ffc1, 0xdbcd12c26eda1624]);
+        assert_eq!(
+            raw,
+            [0xc621fbcd16d92688, 0x705a5661a791ffc1, 0xdbcd12c26eda1624]
+        );
     }
 
     #[test]
@@ -181,10 +195,34 @@ mod tests {
     fn test_dataset_sized_permutations() {
         // (seed, n, first 6, last 3, checksum)
         let cases: [(u64, usize, [usize; 6], [usize; 3], u64); 4] = [
-            (42, 2376, [658, 1619, 1811, 47, 1494, 1273], [1572, 1633, 1672], CHECKSUMS[0]),
-            (42, 100000, [45262, 49850, 30394, 90177, 95569, 10900], [5668, 22113, 75400], CHECKSUMS[1]),
-            (42, 460341, [21697, 61600, 155055, 325090, 320249, 306258], [131009, 129997, 75400], CHECKSUMS[2]),
-            (7, 70000, [15808, 48179, 11705, 6440, 12002, 28192], [63842, 27285, 16809], CHECKSUMS[3]),
+            (
+                42,
+                2376,
+                [658, 1619, 1811, 47, 1494, 1273],
+                [1572, 1633, 1672],
+                CHECKSUMS[0],
+            ),
+            (
+                42,
+                100000,
+                [45262, 49850, 30394, 90177, 95569, 10900],
+                [5668, 22113, 75400],
+                CHECKSUMS[1],
+            ),
+            (
+                42,
+                460341,
+                [21697, 61600, 155055, 325090, 320249, 306258],
+                [131009, 129997, 75400],
+                CHECKSUMS[2],
+            ),
+            (
+                7,
+                70000,
+                [15808, 48179, 11705, 6440, 12002, 28192],
+                [63842, 27285, 16809],
+                CHECKSUMS[3],
+            ),
         ];
         for (seed, n, head, tail, sum) in cases {
             let p = permutation(seed, n);
@@ -194,5 +232,10 @@ mod tests {
         }
     }
 
-    const CHECKSUMS: [u64; 4] = [3335535977, 249157033702609, 24370630385377046, 85727311659269];
+    const CHECKSUMS: [u64; 4] = [
+        3335535977,
+        249157033702609,
+        24370630385377046,
+        85727311659269,
+    ];
 }

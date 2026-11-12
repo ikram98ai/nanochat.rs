@@ -14,7 +14,9 @@ use serde_json::json;
 
 use nanochat::base_eval::evaluate_core;
 use nanochat::checkpoint_manager::{load_checkpoint, load_optimizer_state, save_checkpoint};
-use nanochat::common::{autodetect_device_type, compute_init, get_base_dir, print0, print_banner, setup_default_logging};
+use nanochat::common::{
+    autodetect_device_type, compute_init, get_base_dir, print0, print_banner, setup_default_logging,
+};
 use nanochat::dataloader::{DataLoader, LoaderState};
 use nanochat::engine::Engine;
 use nanochat::gpt::{has_ve, GPTConfig, GPT};
@@ -180,7 +182,10 @@ fn main() -> anyhow::Result<()> {
 
     // Initialize the model (trainable: parameters live in a VarMap)
     let config = build_config(&args, args.depth, vocab_size);
-    print0(&format!("Model config:\n{}", serde_json::to_string_pretty(&config)?));
+    print0(&format!(
+        "Model config:\n{}",
+        serde_json::to_string_pretty(&config)?
+    ));
     let mut varmap = VarMap::new();
     let vb = VarBuilder::from_varmap(&varmap, DType::F32, &device);
     let model = GPT::new(config.clone(), vb)?;
@@ -188,7 +193,10 @@ fn main() -> anyhow::Result<()> {
     varmap.set(init.iter().map(|(k, v)| (k, v)))?;
 
     let base_dir = get_base_dir();
-    let output_dirname = args.model_tag.clone().unwrap_or_else(|| format!("d{}", args.depth));
+    let output_dirname = args
+        .model_tag
+        .clone()
+        .unwrap_or_else(|| format!("d{}", args.depth));
     let checkpoint_dir = base_dir.join("base_checkpoints").join(&output_dirname);
 
     // If we are resuming, overwrite the model parameters with those of the checkpoint
@@ -196,7 +204,10 @@ fn main() -> anyhow::Result<()> {
     let mut resume_meta: Option<serde_json::Value> = None;
     if resuming {
         anyhow::ensure!(args.resume_from_step >= 0, "invalid --resume-from-step");
-        print0(&format!("Resuming optimization from step {}", args.resume_from_step));
+        print0(&format!(
+            "Resuming optimization from step {}",
+            args.resume_from_step
+        ));
         let (model_data, meta_data) =
             load_checkpoint(&checkpoint_dir, args.resume_from_step as usize, &device)?;
         let model_data: HashMap<String, Tensor> = model_data
@@ -208,7 +219,10 @@ fn main() -> anyhow::Result<()> {
             .collect::<candle_core::Result<_>>()?;
         // strict: the checkpoint must provide every parameter of the model
         for name in varmap.data().lock().unwrap().keys() {
-            anyhow::ensure!(model_data.contains_key(name), "checkpoint is missing parameter {name}");
+            anyhow::ensure!(
+                model_data.contains_key(name),
+                "checkpoint is missing parameter {name}"
+            );
         }
         varmap.set(model_data.iter().map(|(k, v)| (k, v)))?;
         resume_meta = Some(meta_data);
@@ -217,11 +231,20 @@ fn main() -> anyhow::Result<()> {
     // Scaling laws and muP extrapolations: training horizon, batch size, LRs, weight decay
     let param_counts = model.num_scaling_params();
     print0("Parameter counts:");
-    for key in ["wte", "value_embeds", "lm_head", "transformer_matrices", "scalars", "total"] {
+    for key in [
+        "wte",
+        "value_embeds",
+        "lm_head",
+        "transformer_matrices",
+        "scalars",
+        "total",
+    ] {
         print0(&format!("{key:24}: {}", param_counts[key]));
     }
     let num_flops_per_token = model.estimate_flops();
-    print0(&format!("Estimated FLOPs per token: {num_flops_per_token:e}"));
+    print0(&format!(
+        "Estimated FLOPs per token: {num_flops_per_token:e}"
+    ));
 
     // 1) optimal training horizon in tokens: data:param ratio over the scaling params
     let num_scaling_params = get_scaling_params(&config);
@@ -247,15 +270,18 @@ fn main() -> anyhow::Result<()> {
     let batch_ratio = total_batch_size as f64 / b_ref;
     let batch_lr_scale = if batch_ratio != 1.0 {
         let scale = batch_ratio.sqrt();
-        print0(&format!("Scaling LRs by {scale:.4} for batch size {total_batch_size} (reference: {b_ref})"));
+        print0(&format!(
+            "Scaling LRs by {scale:.4} for batch size {total_batch_size} (reference: {b_ref})"
+        ));
         scale
     } else {
         1.0
     };
 
     // 4) weight decay scaling to keep T_epoch = B/(η·λ·D) constant: λ = λ_ref·√(B/B_ref)·(D_ref/D)
-    let weight_decay_scaled =
-        args.weight_decay * (total_batch_size as f64 / b_ref).sqrt() * (d_ref / target_tokens as f64);
+    let weight_decay_scaled = args.weight_decay
+        * (total_batch_size as f64 / b_ref).sqrt()
+        * (d_ref / target_tokens as f64);
     if weight_decay_scaled != args.weight_decay {
         print0(&format!(
             "Scaling weight decay from {:.6} to {weight_decay_scaled:.6} for depth {}",
@@ -281,27 +307,48 @@ fn main() -> anyhow::Result<()> {
 
     // Initialize the DataLoaders for train/val
     let dataloader_resume_state: Option<LoaderState> = match &resume_meta {
-        Some(meta) => Some(serde_json::from_value(meta["dataloader_state_dict"].clone())?),
+        Some(meta) => Some(serde_json::from_value(
+            meta["dataloader_state_dict"].clone(),
+        )?),
         None => None,
     };
     let mut train_loader = DataLoader::new(
-        &tokenizer, args.device_batch_size, args.max_seq_len, "train", None, 128, &device,
-        dataloader_resume_state.as_ref(), 1000,
+        &tokenizer,
+        args.device_batch_size,
+        args.max_seq_len,
+        "train",
+        None,
+        128,
+        &device,
+        dataloader_resume_state.as_ref(),
+        1000,
     )?;
-    let (mut x, mut y, mut dataloader_state): (Tensor, Tensor, LoaderState) = train_loader.next_batch()?;
+    let (mut x, mut y, mut dataloader_state): (Tensor, Tensor, LoaderState) =
+        train_loader.next_batch()?;
 
     // num_iterations: either given, or from target flops, or from target data:param ratio
-    assert!(args.num_iterations > 0 || args.target_param_data_ratio > 0.0 || args.target_flops > 0.0);
+    assert!(
+        args.num_iterations > 0 || args.target_param_data_ratio > 0.0 || args.target_flops > 0.0
+    );
     let num_iterations: usize = if args.num_iterations > 0 {
-        print0(&format!("Using user-provided number of iterations: {}", args.num_iterations));
+        print0(&format!(
+            "Using user-provided number of iterations: {}",
+            args.num_iterations
+        ));
         args.num_iterations as usize
     } else if args.target_flops > 0.0 {
-        let n = round_half_even(args.target_flops / (num_flops_per_token as f64 * total_batch_size as f64)) as usize;
-        print0(&format!("Calculated number of iterations from target FLOPs: {n}"));
+        let n = round_half_even(
+            args.target_flops / (num_flops_per_token as f64 * total_batch_size as f64),
+        ) as usize;
+        print0(&format!(
+            "Calculated number of iterations from target FLOPs: {n}"
+        ));
         n
     } else {
         let n = (target_tokens as usize) / total_batch_size;
-        print0(&format!("Calculated number of iterations from target data:param ratio: {n}"));
+        print0(&format!(
+            "Calculated number of iterations from target data:param ratio: {n}"
+        ));
         n
     };
     let total_tokens = total_batch_size * num_iterations;
@@ -310,7 +357,10 @@ fn main() -> anyhow::Result<()> {
         "Tokens : Scaling params ratio: {:.2}",
         (total_batch_size * num_iterations) as f64 / num_scaling_params as f64
     ));
-    print0(&format!("Total training FLOPs estimate: {:e}", num_flops_per_token as f64 * total_tokens as f64));
+    print0(&format!(
+        "Total training FLOPs estimate: {:e}",
+        num_flops_per_token as f64 * total_tokens as f64
+    ));
 
     // Learning rate schedule (linear warmup, constant, linear warmdown)
     let warmdown_iters = round_half_even(args.warmdown_ratio * num_iterations as f64) as usize;
@@ -339,7 +389,9 @@ fn main() -> anyhow::Result<()> {
     };
     // Weight decay scheduler for Muon (cosine decay to zero over the course of training)
     let get_weight_decay = |it: usize| -> f64 {
-        weight_decay_scaled * 0.5 * (1.0 + (std::f64::consts::PI * it as f64 / num_iterations as f64).cos())
+        weight_decay_scaled
+            * 0.5
+            * (1.0 + (std::f64::consts::PI * it as f64 / num_iterations as f64).cos())
     };
 
     // Loop state (variables updated by the training loop)
@@ -350,7 +402,9 @@ fn main() -> anyhow::Result<()> {
     let mut total_training_time = 0f64; // total wall-clock time of training
     if let Some(meta) = &resume_meta {
         let loop_state = &meta["loop_state"];
-        step = meta["step"].as_u64().ok_or_else(|| anyhow::anyhow!("checkpoint meta has no step"))? as usize;
+        step = meta["step"]
+            .as_u64()
+            .ok_or_else(|| anyhow::anyhow!("checkpoint meta has no step"))? as usize;
         val_bpb = meta["val_bpb"].as_f64();
         // (a non-finite min_val_bpb is stored as null in json)
         min_val_bpb = loop_state["min_val_bpb"].as_f64().unwrap_or(f64::INFINITY);
@@ -367,7 +421,9 @@ fn main() -> anyhow::Result<()> {
         "Tokens / micro-batch / rank: {} x {} = {tokens_per_fwdbwd}",
         args.device_batch_size, args.max_seq_len
     ));
-    print0(&format!("Total batch size {total_batch_size} => gradient accumulation steps: {grad_accum_steps}"));
+    print0(&format!(
+        "Total batch size {total_batch_size} => gradient accumulation steps: {grad_accum_steps}"
+    ));
 
     let all_vars: Vec<(String, Var)> = {
         let data = varmap.data().lock().unwrap();
@@ -381,12 +437,20 @@ fn main() -> anyhow::Result<()> {
         // once in a while: evaluate the val bpb
         if args.eval_every > 0 && (last_step || step % args.eval_every as usize == 0) {
             let mut val_loader = DataLoader::new(
-                &tokenizer, args.device_batch_size, args.max_seq_len, "val", None, 128, &device, None, 1000,
+                &tokenizer,
+                args.device_batch_size,
+                args.max_seq_len,
+                "val",
+                None,
+                128,
+                &device,
+                None,
+                1000,
             )?;
-            let eval_steps = args.eval_tokens / (args.device_batch_size * args.max_seq_len * ddp_world_size);
-            let mut batches = std::iter::from_fn(|| {
-                Some(val_loader.next_batch().map(|(x, y, _)| (x, y)))
-            });
+            let eval_steps =
+                args.eval_tokens / (args.device_batch_size * args.max_seq_len * ddp_world_size);
+            let mut batches =
+                std::iter::from_fn(|| Some(val_loader.next_batch().map(|(x, y, _)| (x, y))));
             let bpb = evaluate_bpb(&model, &mut batches, eval_steps, &token_bytes)?;
             print0(&format!("Step {step:05} | Validation bpb: {bpb:.6}"));
             min_val_bpb = min_val_bpb.min(bpb);
@@ -397,7 +461,8 @@ fn main() -> anyhow::Result<()> {
         if args.core_metric_every > 0
             && (last_step || (step > 0 && step % args.core_metric_every as usize == 0))
         {
-            let results = evaluate_core(&model, &tokenizer, &device, args.core_metric_max_per_task)?;
+            let results =
+                evaluate_core(&model, &tokenizer, &device, args.core_metric_max_per_task)?;
             print0(&format!(
                 "Step {step:05} | CORE metric: {:.4}",
                 results["core_metric"].as_f64().unwrap_or(f64::NAN)
@@ -405,7 +470,9 @@ fn main() -> anyhow::Result<()> {
         }
 
         // once in a while: sample from the model
-        if args.sample_every > 0 && (last_step || (step > 0 && step % args.sample_every as usize == 0)) {
+        if args.sample_every > 0
+            && (last_step || (step > 0 && step % args.sample_every as usize == 0))
+        {
             let prompts = [
                 "The capital of France is",
                 "The chemical symbol of gold is",
@@ -468,7 +535,7 @@ fn main() -> anyhow::Result<()> {
         for _micro_step in 0..grad_accum_steps {
             let loss = model.forward(&x, Some(&y), None, "mean")?;
             train_loss_f = loss.to_scalar::<f32>()? as f64; // for logging
-            // each backward is a grad sum => normalize loss here
+                                                            // each backward is a grad sum => normalize loss here
             let loss = (loss / grad_accum_steps as f64)?;
             let grads = loss.backward()?;
             for (_, var) in &all_vars {
@@ -510,7 +577,10 @@ fn main() -> anyhow::Result<()> {
         let steps_done = step as i64 - 10;
         let eta_str = if steps_done > 0 {
             let avg = total_training_time / steps_done as f64;
-            format!(" | eta: {:.1}m", (num_iterations - step) as f64 * avg / 60.0)
+            format!(
+                " | eta: {:.1}m",
+                (num_iterations - step) as f64 * avg / 60.0
+            )
         } else {
             String::new()
         };
@@ -529,7 +599,10 @@ fn main() -> anyhow::Result<()> {
         step += 1;
     }
 
-    print0(&format!("Total training time: {:.2}m", total_training_time / 60.0));
+    print0(&format!(
+        "Total training time: {:.2}m",
+        total_training_time / 60.0
+    ));
     if val_bpb.is_some() {
         print0(&format!("Minimum validation bpb: {min_val_bpb:.6}"));
     }

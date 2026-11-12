@@ -14,7 +14,9 @@ use nanochat::checkpoint_manager::{
     build_model_for_training, find_largest_model, find_last_step, load_optimizer_state,
     save_checkpoint,
 };
-use nanochat::common::{autodetect_device_type, compute_init, get_base_dir, print0, setup_default_logging};
+use nanochat::common::{
+    autodetect_device_type, compute_init, get_base_dir, print0, setup_default_logging,
+};
 use nanochat::dataloader::SftDataLoader;
 use nanochat::engine::Engine;
 use nanochat::loss_eval::evaluate_bpb;
@@ -109,11 +111,15 @@ fn inherit<T: Copy + std::fmt::Display + serde::de::DeserializeOwned + PartialEq
             v
         }
         (None, None) => {
-            print0(&format!("Inherited {name}={fallback} from pretrained checkpoint"));
+            print0(&format!(
+                "Inherited {name}={fallback} from pretrained checkpoint"
+            ));
             fallback
         }
         (Some(a), Some(p)) if a != p => {
-            print0(&format!("NOTE: --{name}={a} overrides pretrained value of {p}"));
+            print0(&format!(
+                "NOTE: --{name}={a} overrides pretrained value of {p}"
+            ));
             a
         }
         (Some(a), _) => {
@@ -155,12 +161,22 @@ fn main() -> anyhow::Result<()> {
     let max_seq_len = inherit("max_seq_len", args.max_seq_len, &meta, 2048);
     let device_batch_size = inherit("device_batch_size", args.device_batch_size, &meta, 32);
     let total_batch_size = inherit("total_batch_size", args.total_batch_size, &meta, 524288);
-    let embedding_lr = inherit("embedding_lr", args.embedding_lr, &pretrain_user_config, 0.3);
-    let unembedding_lr = inherit("unembedding_lr", args.unembedding_lr, &pretrain_user_config, 0.004);
+    let embedding_lr = inherit(
+        "embedding_lr",
+        args.embedding_lr,
+        &pretrain_user_config,
+        0.3,
+    );
+    let unembedding_lr = inherit(
+        "unembedding_lr",
+        args.unembedding_lr,
+        &pretrain_user_config,
+        0.004,
+    );
     let matrix_lr = inherit("matrix_lr", args.matrix_lr, &pretrain_user_config, 0.02);
 
     let depth = model.config.n_layer;
-    let num_flops_per_token = model.estimate_flops();
+    let _num_flops_per_token = model.estimate_flops();
     let tokens_per_fwdbwd = device_batch_size * max_seq_len;
     let world_tokens_per_fwdbwd = tokens_per_fwdbwd * ddp_world_size;
     assert!(total_batch_size % world_tokens_per_fwdbwd == 0);
@@ -171,7 +187,8 @@ fn main() -> anyhow::Result<()> {
     print0(&format!(
         "Total batch size {total_batch_size} => gradient accumulation steps: {grad_accum_steps}"
     ));
-    let token_bytes = Tensor::from_vec(tokenizer.token_bytes(), tokenizer.get_vocab_size(), &device)?;
+    let token_bytes =
+        Tensor::from_vec(tokenizer.token_bytes(), tokenizer.get_vocab_size(), &device)?;
 
     // Initialize the Optimizer. Pretraining ramps weight_decay to zero by the
     // end, so SFT continues with zero.
@@ -204,7 +221,11 @@ fn main() -> anyhow::Result<()> {
     ];
     for _ in 0..args.mmlu_epochs {
         // 100K rows per epoch
-        train_tasks.push(Box::new(MMLU::new("all", "auxiliary_train", Slice::default())?));
+        train_tasks.push(Box::new(MMLU::new(
+            "all",
+            "auxiliary_train",
+            Slice::default(),
+        )?));
     }
     for _ in 0..args.gsm8k_epochs {
         // 8K rows per epoch
@@ -225,8 +246,14 @@ fn main() -> anyhow::Result<()> {
     ]);
 
     let mut train_loader = SftDataLoader::new(
-        &train_dataset, &tokenizer, device_batch_size, max_seq_len, true, args.num_iterations,
-        &device, 100,
+        &train_dataset,
+        &tokenizer,
+        device_batch_size,
+        max_seq_len,
+        true,
+        args.num_iterations,
+        &device,
+        100,
     );
 
     // Learning rate schedule based on progress (0 to 1), because SFT doesn't
@@ -242,8 +269,9 @@ fn main() -> anyhow::Result<()> {
         }
     };
     // Momentum scheduler for Muon optimizer
-    let get_muon_momentum =
-        |it: usize| -> f64 { (1.0 - (it as f64 / 300.0).min(1.0)) * 0.85 + (it as f64 / 300.0).min(1.0) * 0.95 };
+    let get_muon_momentum = |it: usize| -> f64 {
+        (1.0 - (it as f64 / 300.0).min(1.0)) * 0.85 + (it as f64 / 300.0).min(1.0) * 0.95
+    };
 
     let all_vars: Vec<(String, Var)> = {
         let data = varmap.data().lock().unwrap();
@@ -265,7 +293,14 @@ fn main() -> anyhow::Result<()> {
         // once in a while: evaluate the val bpb
         if last_step || (args.eval_every > 0 && step % args.eval_every as usize == 0) {
             let mut val_loader = SftDataLoader::new(
-                &val_dataset, &tokenizer, device_batch_size, max_seq_len, false, -1, &device, 100,
+                &val_dataset,
+                &tokenizer,
+                device_batch_size,
+                max_seq_len,
+                false,
+                -1,
+                &device,
+                100,
             );
             let eval_steps = args.eval_tokens / (device_batch_size * max_seq_len * ddp_world_size);
             let mut batches = std::iter::from_fn(|| Some(val_loader.next_batch()));
@@ -289,9 +324,21 @@ fn main() -> anyhow::Result<()> {
                 } else {
                     args.chatcore_max_sample
                 };
-                let max_problems = if limit < 0 { None } else { Some(limit as usize) };
+                let max_problems = if limit < 0 {
+                    None
+                } else {
+                    Some(limit as usize)
+                };
                 let acc = run_chat_eval(
-                    task_name, &model, &tokenizer, &engine, device_batch_size, 1, 512, 0.0, 50,
+                    task_name,
+                    &model,
+                    &tokenizer,
+                    &engine,
+                    device_batch_size,
+                    1,
+                    512,
+                    0.0,
+                    50,
                     max_problems,
                 )?;
                 task_results.insert(task_name, acc);
@@ -302,7 +349,11 @@ fn main() -> anyhow::Result<()> {
                 tasks
                     .iter()
                     .map(|t| {
-                        let baseline = if categorical_tasks.contains(t) { 0.25 } else { 0.0 };
+                        let baseline = if categorical_tasks.contains(t) {
+                            0.25
+                        } else {
+                            0.0
+                        };
                         (task_results[t] - baseline) / (1.0 - baseline)
                     })
                     .sum::<f64>()
@@ -317,10 +368,15 @@ fn main() -> anyhow::Result<()> {
 
         // save checkpoint at the end of the run
         if last_step {
-            let output_dirname = args.model_tag.clone().unwrap_or_else(|| format!("d{depth}"));
+            let output_dirname = args
+                .model_tag
+                .clone()
+                .unwrap_or_else(|| format!("d{depth}"));
             let sft_checkpoint_dir = base_dir.join("chatsft_checkpoints").join(output_dirname);
-            let model_data: HashMap<String, Tensor> =
-                all_vars.iter().map(|(k, v)| (k.clone(), v.as_tensor().clone())).collect();
+            let model_data: HashMap<String, Tensor> = all_vars
+                .iter()
+                .map(|(k, v)| (k.clone(), v.as_tensor().clone()))
+                .collect();
             let meta_data = json!({
                 "step": step,
                 "val_bpb": val_bpb,
@@ -399,7 +455,10 @@ fn main() -> anyhow::Result<()> {
         ));
     }
 
-    print0(&format!("Total training time: {:.2}m", total_training_time / 60.0));
+    print0(&format!(
+        "Total training time: {:.2}m",
+        total_training_time / 60.0
+    ));
     print0(&format!("Minimum validation bpb: {min_val_bpb:.4}"));
     Ok(())
 }

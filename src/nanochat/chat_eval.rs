@@ -56,8 +56,10 @@ pub fn run_generative_eval(
         )?;
         // Decode the completions as text
         let prefix_length = encoded_prompt.len();
-        let completions: Vec<String> =
-            results.iter().map(|tokens| tokenizer.decode(&tokens[prefix_length..])).collect();
+        let completions: Vec<String> = results
+            .iter()
+            .map(|tokens| tokenizer.decode(&tokens[prefix_length..]))
+            .collect();
         // Evaluate success criteria
         let mut passed = false;
         for completion in &completions {
@@ -115,14 +117,17 @@ pub fn run_categorical_eval(
         let (i0, i1) = (i * batch_size, ((i + 1) * batch_size).min(num_problems));
 
         // Prepare the batch of problems; pad/collate to the longest prompt.
-        let conversations: Vec<_> = (i0..i1).map(|ii| task_object.get(ii)).collect::<Result<_>>()?;
+        let conversations: Vec<_> = (i0..i1)
+            .map(|ii| task_object.get(ii))
+            .collect::<Result<_>>()?;
         let prompt_ids: Vec<Vec<u32>> = conversations
             .iter()
             .map(|c| tokenizer.render_for_completion(c))
             .collect::<Result<_>>()?;
         let max_length = prompt_ids.iter().map(|ids| ids.len()).max().unwrap();
         // where the last token is (and the predicted answer)
-        let answer_time_positions: Vec<usize> = prompt_ids.iter().map(|ids| ids.len() - 1).collect();
+        let answer_time_positions: Vec<usize> =
+            prompt_ids.iter().map(|ids| ids.len() - 1).collect();
         let mut padded: Vec<i64> = Vec::with_capacity(prompt_ids.len() * max_length);
         for ids in &prompt_ids {
             padded.extend(ids.iter().map(|&t| t as i64));
@@ -137,16 +142,18 @@ pub fn run_categorical_eval(
         // This narrows the focus to only the available letters, which helps a lot.
         for (idx, conversation) in conversations.iter().enumerate() {
             // get the token ids of all the available letters of this problem
-            let letters: Vec<String> =
-                serde_json::from_value(conversation["letters"].clone())
-                    .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+            let letters: Vec<String> = serde_json::from_value(conversation["letters"].clone())
+                .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
             let mut letter_ids = Vec::with_capacity(letters.len());
             for letter in &letters {
                 let id = match letter_to_id_cache.get(letter) {
                     Some(&id) => id,
                     None => {
                         let encoded_letter = tokenizer.encode(letter, None, None);
-                        assert!(encoded_letter.len() == 1, "Each letter must be a single token");
+                        assert!(
+                            encoded_letter.len() == 1,
+                            "Each letter must be a single token"
+                        );
                         letter_to_id_cache.insert(letter.clone(), encoded_letter[0]);
                         encoded_letter[0]
                     }
@@ -173,7 +180,10 @@ pub fn run_categorical_eval(
     }
 
     let average = num_passed as f64 / total as f64;
-    print0(&format!("Final: {num_passed}/{total} ({:.2}%)", 100.0 * average));
+    print0(&format!(
+        "Final: {num_passed}/{total} ({:.2}%)",
+        100.0 * average
+    ));
     Ok(average)
 }
 
@@ -217,9 +227,13 @@ pub fn run_chat_eval(
             top_k,
             max_problems,
         ),
-        "categorical" => {
-            run_categorical_eval(task_object.as_ref(), tokenizer, model, batch_size, max_problems)
-        }
+        "categorical" => run_categorical_eval(
+            task_object.as_ref(),
+            tokenizer,
+            model,
+            batch_size,
+            max_problems,
+        ),
         other => candle_core::bail!("Unsupported task evaluation type: {other}"),
     }
 }

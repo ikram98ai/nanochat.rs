@@ -3,7 +3,7 @@
 //! version). Tensors are (B, T, H, D); window_size is a (left, right) tuple
 //! where -1 means unlimited.
 
-use candle_core::{D, DType, Result, Tensor};
+use candle_core::{DType, Result, Tensor, D};
 use candle_nn::ops::softmax;
 
 use super::engine::KVCache;
@@ -82,7 +82,10 @@ fn sdpa_attention(
         let (k, v) = if window >= 0 && (window as usize) < t_k {
             // window is "left" tokens: we need to include (window + 1) keys total
             let start = t_k.saturating_sub(window as usize + 1);
-            (k.narrow(2, start, t_k - start)?, v.narrow(2, start, t_k - start)?)
+            (
+                k.narrow(2, start, t_k - start)?,
+                v.narrow(2, start, t_k - start)?,
+            )
         } else {
             (k.clone(), v.clone())
         };

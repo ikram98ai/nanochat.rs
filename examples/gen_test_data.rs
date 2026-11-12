@@ -57,19 +57,24 @@ const CPU: &Device = &Device::Cpu;
 
 fn randn(rng: &mut StdRng, shape: &[usize], std: f32) -> Result<Tensor> {
     let dist = rand_distr::Normal::new(0f32, std).unwrap();
-    let data: Vec<f32> = (0..shape.iter().product()).map(|_| rng.sample(dist)).collect();
+    let data: Vec<f32> = (0..shape.iter().product())
+        .map(|_| rng.sample(dist))
+        .collect();
     Ok(Tensor::from_vec(data, shape, CPU)?)
 }
 
 fn uniform(rng: &mut StdRng, shape: &[usize], lo: f32, hi: f32) -> Result<Tensor> {
-    let data: Vec<f32> = (0..shape.iter().product()).map(|_| rng.random_range(lo..hi)).collect();
+    let data: Vec<f32> = (0..shape.iter().product())
+        .map(|_| rng.random_range(lo..hi))
+        .collect();
     Ok(Tensor::from_vec(data, shape, CPU)?)
 }
 
 /// Random token ids in [0, vocab_size)
 fn randint(rng: &mut StdRng, shape: &[usize], vocab_size: usize) -> Result<Tensor> {
-    let data: Vec<i64> =
-        (0..shape.iter().product()).map(|_| rng.random_range(0..vocab_size as i64)).collect();
+    let data: Vec<i64> = (0..shape.iter().product())
+        .map(|_| rng.random_range(0..vocab_size as i64))
+        .collect();
     Ok(Tensor::from_vec(data, shape, CPU)?)
 }
 
@@ -103,13 +108,19 @@ fn random_weights(
 }
 
 fn build_model(config: &GPTConfig, weights: &Tensors) -> Result<GPT> {
-    Ok(GPT::new(config.clone(), VarBuilder::from_tensors(weights.clone(), DType::F32, CPU))?)
+    Ok(GPT::new(
+        config.clone(),
+        VarBuilder::from_tensors(weights.clone(), DType::F32, CPU),
+    )?)
 }
 
 /// A trainable copy of the model: parameters live in the returned VarMap.
 fn build_train_model(config: &GPTConfig, weights: &Tensors) -> Result<(GPT, VarMap)> {
     let mut varmap = VarMap::new();
-    let model = GPT::new(config.clone(), VarBuilder::from_varmap(&varmap, DType::F32, CPU))?;
+    let model = GPT::new(
+        config.clone(),
+        VarBuilder::from_varmap(&varmap, DType::F32, CPU),
+    )?;
     varmap.set(weights.iter())?;
     Ok((model, varmap))
 }
@@ -146,7 +157,9 @@ enum Leaf {
 }
 
 fn byte_arrays<'a>(values: impl Iterator<Item = &'a String>) -> Vec<ByteArray> {
-    values.map(|v| ByteArray::from(v.as_bytes().to_vec())).collect()
+    values
+        .map(|v| ByteArray::from(v.as_bytes().to_vec()))
+        .collect()
 }
 
 /// Write a parquet file with the given schema; each row group lists its leaf
@@ -159,13 +172,21 @@ fn write_parquet(path: &Path, schema: &str, row_groups: Vec<Vec<Leaf>>) -> Resul
     for leaves in row_groups {
         let mut row_group = writer.next_row_group()?;
         for leaf in leaves {
-            let mut column = row_group.next_column()?.expect("more leaves than schema columns");
+            let mut column = row_group
+                .next_column()?
+                .expect("more leaves than schema columns");
             match leaf {
                 Leaf::Str(values) => {
-                    column.typed::<ByteArrayType>().write_batch(&byte_arrays(values.iter()), None, None)?;
+                    column.typed::<ByteArrayType>().write_batch(
+                        &byte_arrays(values.iter()),
+                        None,
+                        None,
+                    )?;
                 }
                 Leaf::Int(values) => {
-                    column.typed::<Int64Type>().write_batch(&values, None, None)?;
+                    column
+                        .typed::<Int64Type>()
+                        .write_batch(&values, None, None)?;
                 }
                 Leaf::StrList(lists) => {
                     // every element is defined; a repetition level of 0 starts a new row
@@ -190,11 +211,20 @@ fn write_parquet(path: &Path, schema: &str, row_groups: Vec<Vec<Leaf>>) -> Resul
 }
 
 fn strs(values: &Value) -> Vec<String> {
-    values.as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect()
+    values
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect()
 }
 
 fn str_column(rows: &[Value], key: &str) -> Leaf {
-    Leaf::Str(rows.iter().map(|r| r[key].as_str().unwrap().to_string()).collect())
+    Leaf::Str(
+        rows.iter()
+            .map(|r| r[key].as_str().unwrap().to_string())
+            .collect(),
+    )
 }
 
 /// Place parquet shards in the hub cache layout ({out}/task_data/...), so the
@@ -208,14 +238,21 @@ fn write_hub_cache(
     shards: &[&[Value]],
     to_leaves: impl Fn(&[Value]) -> Vec<Leaf>,
 ) -> Result<()> {
-    let shards_dir = out.join("task_data").join(repo_id.replace('/', "--")).join(subset).join(split);
+    let shards_dir = out
+        .join("task_data")
+        .join(repo_id.replace('/', "--"))
+        .join(subset)
+        .join(split);
     let mut filenames = Vec::new();
     for (shard_index, rows) in shards.iter().enumerate() {
         let filename = format!("{shard_index:05}.parquet");
         write_parquet(&shards_dir.join(&filename), schema, vec![to_leaves(rows)])?;
         filenames.push(filename);
     }
-    std::fs::write(shards_dir.join("manifest.json"), serde_json::to_string(&filenames)?)?;
+    std::fs::write(
+        shards_dir.join("manifest.json"),
+        serde_json::to_string(&filenames)?,
+    )?;
     Ok(())
 }
 
@@ -281,17 +318,31 @@ fn tiktoken_pickle(pattern: &str, ranks: &[Vec<u8>], specials: &[(String, u32)])
 /// BPE whose vocab maps each token (bytes spelled with the GPT-2
 /// byte->unicode table) to its rank.
 fn hf_tokenizer_json(pattern: &str, ranks: &[Vec<u8>], specials: &[(String, u32)]) -> Value {
-    let printable =
-        |b: u32| (0x21..=0x7e).contains(&b) || (0xa1..=0xac).contains(&b) || (0xae..=0xff).contains(&b);
+    let printable = |b: u32| {
+        (0x21..=0x7e).contains(&b) || (0xa1..=0xac).contains(&b) || (0xae..=0xff).contains(&b)
+    };
     let mut byte_to_char = Vec::with_capacity(256);
     let mut n = 0;
     for b in 0..256u32 {
-        byte_to_char.push(char::from_u32(if printable(b) { b } else { n += 1; 255 + n }).unwrap());
+        byte_to_char.push(
+            char::from_u32(if printable(b) {
+                b
+            } else {
+                n += 1;
+                255 + n
+            })
+            .unwrap(),
+        );
     }
     let vocab: Map<String, Value> = ranks
         .iter()
         .enumerate()
-        .map(|(rank, token)| (token.iter().map(|&b| byte_to_char[b as usize]).collect(), json!(rank)))
+        .map(|(rank, token)| {
+            (
+                token.iter().map(|&b| byte_to_char[b as usize]).collect(),
+                json!(rank),
+            )
+        })
         .collect();
     let added_tokens: Vec<Value> = specials
         .iter()
@@ -372,7 +423,15 @@ fn kv_decode_case(
     let m = &model.config;
     let mut rng = StdRng::seed_from_u64(11);
     let prompt = randint(&mut rng, &[1, prompt_len], m.vocab_size)?;
-    let kv = KVCache::new(1, m.n_kv_head, cache_len, m.n_embd / m.n_head, m.n_layer, CPU, DType::F32)?;
+    let kv = KVCache::new(
+        1,
+        m.n_kv_head,
+        cache_len,
+        m.n_embd / m.n_head,
+        m.n_layer,
+        CPU,
+        DType::F32,
+    )?;
     let logits = model.forward(&prompt, None, Some(&kv), "mean")?;
     let mut last = logits.narrow(1, prompt_len - 1, 1)?.squeeze(1)?;
     fx.insert(format!("{prefix}_prompt"), prompt);
@@ -382,7 +441,10 @@ fn kv_decode_case(
         let next_tok = last.argmax(1)?.to_vec1::<u32>()?[0];
         tokens.push(next_tok);
         let ids = Tensor::from_vec(vec![next_tok as i64], (1, 1), CPU)?;
-        last = model.forward(&ids, None, Some(&kv), "mean")?.narrow(1, 0, 1)?.squeeze(1)?;
+        last = model
+            .forward(&ids, None, Some(&kv), "mean")?
+            .narrow(1, 0, 1)?
+            .squeeze(1)?;
     }
     fx.insert(format!("{prefix}_final_logits"), last);
     meta.insert(format!("{prefix}_tokens"), json!(tokens));
@@ -424,11 +486,17 @@ fn gen_model_data(out: &Path) -> Result<(GPTConfig, Tensors, Tokenizer)> {
     let mut fx: Tensors = HashMap::new();
     let mut meta = Map::new();
     meta.insert("config".into(), serde_json::to_value(&config)?);
-    meta.insert("padded_vocab_size".into(), json!(weights["transformer.wte.weight"].dim(0)?));
+    meta.insert(
+        "padded_vocab_size".into(),
+        json!(weights["transformer.wte.weight"].dim(0)?),
+    );
     let window_sizes: Vec<[i64; 2]> = model.window_sizes.iter().map(|w| [w.0, w.1]).collect();
     meta.insert("window_sizes".into(), json!(window_sizes));
     meta.insert("num_flops_per_token".into(), json!(model.estimate_flops()));
-    meta.insert("num_scaling_params".into(), json!(model.num_scaling_params()));
+    meta.insert(
+        "num_scaling_params".into(),
+        json!(model.num_scaling_params()),
+    );
     meta.insert("rms_norm_eps".into(), json!(f32::EPSILON as f64));
 
     // Micro fixtures: rmsnorm, rotary, attention with/without windows and cache
@@ -448,8 +516,14 @@ fn gen_model_data(out: &Path) -> Result<(GPTConfig, Tensors, Tokenizer)> {
     let q = randn(&mut g, &[1, 6, 4, 16], 1.0)?;
     let k = randn(&mut g, &[1, 6, 2, 16], 1.0)?;
     let v = randn(&mut g, &[1, 6, 2, 16], 1.0)?;
-    fx.insert("attn_full_out".into(), flash_attn_func(&q, &k, &v, true, (512, 0))?);
-    fx.insert("attn_win2_out".into(), flash_attn_func(&q, &k, &v, true, (2, 0))?);
+    fx.insert(
+        "attn_full_out".into(),
+        flash_attn_func(&q, &k, &v, true, (512, 0))?,
+    );
+    fx.insert(
+        "attn_win2_out".into(),
+        flash_attn_func(&q, &k, &v, true, (2, 0))?,
+    );
     fx.insert("attn_q".into(), q);
     fx.insert("attn_k".into(), k);
     fx.insert("attn_v".into(), v);
@@ -474,14 +548,30 @@ fn gen_model_data(out: &Path) -> Result<(GPTConfig, Tensors, Tokenizer)> {
     // Full model forward, training mode (no KV cache)
     let mut g = StdRng::seed_from_u64(7);
     let ids1 = randint(&mut g, &[2, 16], config.vocab_size)?;
-    fx.insert("fw1_logits".into(), model.forward(&ids1, None, None, "mean")?);
+    fx.insert(
+        "fw1_logits".into(),
+        model.forward(&ids1, None, None, "mean")?,
+    );
     let ids2 = randint(&mut g, &[1, 200], config.vocab_size)?; // windows bind: 128 < 200
-    fx.insert("fw2_logits".into(), model.forward(&ids2, None, None, "mean")?);
+    fx.insert(
+        "fw2_logits".into(),
+        model.forward(&ids2, None, None, "mean")?,
+    );
     fx.insert("fw2_ids".into(), ids2);
     let targets = randint(&mut g, &[2, 16], config.vocab_size)?;
     let targets = mask_targets(&mut g, &targets, 0.15)?;
-    fx.insert("loss_mean".into(), model.forward(&ids1, Some(&targets), None, "mean")?.reshape(1)?);
-    fx.insert("loss_sum".into(), model.forward(&ids1, Some(&targets), None, "sum")?.reshape(1)?);
+    fx.insert(
+        "loss_mean".into(),
+        model
+            .forward(&ids1, Some(&targets), None, "mean")?
+            .reshape(1)?,
+    );
+    fx.insert(
+        "loss_sum".into(),
+        model
+            .forward(&ids1, Some(&targets), None, "sum")?
+            .reshape(1)?,
+    );
     fx.insert("loss_targets".into(), targets);
     fx.insert("fw1_ids".into(), ids1);
 
@@ -490,7 +580,9 @@ fn gen_model_data(out: &Path) -> Result<(GPTConfig, Tensors, Tokenizer)> {
 
     // Naive model.generate (recomputes the full forward each step), temperature=0
     let mut g = StdRng::seed_from_u64(13);
-    let gen_prompt: Vec<u32> = (0..10).map(|_| g.random_range(0..config.vocab_size as u32)).collect();
+    let gen_prompt: Vec<u32> = (0..10)
+        .map(|_| g.random_range(0..config.vocab_size as u32))
+        .collect();
     let mut generated = Vec::new();
     model.generate(&gen_prompt, 8, 0.0, None, 42, |t| {
         generated.push(t);
@@ -503,7 +595,9 @@ fn gen_model_data(out: &Path) -> Result<(GPTConfig, Tensors, Tokenizer)> {
     let special_tokenizer = SpecialOnlyTokenizer;
     let engine = Engine::new(&model, &special_tokenizer);
     let mut g = StdRng::seed_from_u64(17);
-    let eng_prompt: Vec<u32> = (0..12).map(|_| g.random_range(0..config.vocab_size as u32)).collect();
+    let eng_prompt: Vec<u32> = (0..12)
+        .map(|_| g.random_range(0..config.vocab_size as u32))
+        .collect();
     let (mut columns, mut masks) = (Vec::new(), Vec::new());
     for step in engine.generate(&eng_prompt, 2, Some(10), 0.0, None, 42)? {
         let (token_column, token_masks) = step?;
@@ -519,37 +613,81 @@ fn gen_model_data(out: &Path) -> Result<(GPTConfig, Tensors, Tokenizer)> {
 
     // Calculator tool
     let calc_cases = [
-        "1+2", "3*4+5", "12/4", "1/3", "(8-3)*2", "10//3", "3.5*2", "2.5+0.1",
-        "1,234+1", "  7 * 7 ", "2**3", "1+; ",
-        "'strawberry'.count('r')", "\"hello world\".count(\"o\")", "'aaa'.count('aa')",
-        "'abc'.count('d')", "import os", "'x'.upper()", "__class__",
+        "1+2",
+        "3*4+5",
+        "12/4",
+        "1/3",
+        "(8-3)*2",
+        "10//3",
+        "3.5*2",
+        "2.5+0.1",
+        "1,234+1",
+        "  7 * 7 ",
+        "2**3",
+        "1+; ",
+        "'strawberry'.count('r')",
+        "\"hello world\".count(\"o\")",
+        "'aaa'.count('aa')",
+        "'abc'.count('d')",
+        "import os",
+        "'x'.upper()",
+        "__class__",
         // floored division, signs
-        "7//-2", "-7//-2", "2//-3", "-7//2", "-3.5//2",
+        "7//-2",
+        "-7//-2",
+        "2//-3",
+        "-7//2",
+        "-3.5//2",
         // literal edge cases
-        "007+1", "00", "000", "00.5+1", "5.",
+        "007+1",
+        "00",
+        "000",
+        "00.5+1",
+        "5.",
         // float str() formatting incl. scientific notation
-        "1/100000", "1.5*10000000000000000", "1/3+0", "0.1+0.2", "10/2-5",
+        "1/100000",
+        "1.5*10000000000000000",
+        "1/3+0",
+        "0.1+0.2",
+        "10/2-5",
         // string atoms, concatenation, parens, chained methods
-        "'.count('", "'a' 'b'.count('b')", "('ab').count('a')", "'ab'.count(('a'))",
-        "'abc'.upper().count('A')", "'  x  '.strip().count('x')", "''.count('')",
+        "'.count('",
+        "'a' 'b'.count('b')",
+        "('ab').count('a')",
+        "'ab'.count(('a'))",
+        "'abc'.upper().count('A')",
+        "'  x  '.strip().count('x')",
+        "''.count('')",
         "'ab'.count('')",
     ];
-    let calculator_cases: Vec<Value> =
-        calc_cases.iter().map(|e| json!({"expr": e, "result": use_calculator(e)})).collect();
+    let calculator_cases: Vec<Value> = calc_cases
+        .iter()
+        .map(|e| json!({"expr": e, "result": use_calculator(e)}))
+        .collect();
     meta.insert("calculator_cases".into(), json!(calculator_cases));
 
     // Tokenizer: train a tiny BPE, export it in all three formats
-    let corpus = TOKENIZER_CORPUS.iter().cycle().take(TOKENIZER_CORPUS.len() * 20).map(|s| s.to_string());
+    let corpus = TOKENIZER_CORPUS
+        .iter()
+        .cycle()
+        .take(TOKENIZER_CORPUS.len() * 20)
+        .map(|s| s.to_string());
     let tok = Tokenizer::train_from_iterator(corpus, 300)?;
     tok.save(out)?;
     let num_ranks = tok.get_vocab_size() - SPECIAL_TOKENS.len();
-    let ranks: Vec<Vec<u8>> =
-        (0..num_ranks as u32).map(|id| tok.decode_single_token_bytes(id).unwrap().to_vec()).collect();
-    let specials: Vec<(String, u32)> =
-        SPECIAL_TOKENS.iter().map(|name| (name.to_string(), tok.encode_special(name))).collect();
+    let ranks: Vec<Vec<u8>> = (0..num_ranks as u32)
+        .map(|id| tok.decode_single_token_bytes(id).unwrap().to_vec())
+        .collect();
+    let specials: Vec<(String, u32)> = SPECIAL_TOKENS
+        .iter()
+        .map(|name| (name.to_string(), tok.encode_special(name)))
+        .collect();
     let formats = out.join("tokenizer_formats");
     std::fs::create_dir_all(formats.join("pkl"))?;
-    std::fs::write(formats.join("pkl").join("tokenizer.pkl"), tiktoken_pickle(SPLIT_PATTERN, &ranks, &specials))?;
+    std::fs::write(
+        formats.join("pkl").join("tokenizer.pkl"),
+        tiktoken_pickle(SPLIT_PATTERN, &ranks, &specials),
+    )?;
     std::fs::create_dir_all(formats.join("hf"))?;
     std::fs::write(
         formats.join("hf").join("tokenizer.json"),
@@ -591,9 +729,14 @@ fn gen_model_data(out: &Path) -> Result<(GPTConfig, Tensors, Tokenizer)> {
             json!({"text": t, "decoded": tok.decode(&ids), "ids": ids})
         })
         .collect();
-    let special_tokens: Map<String, Value> = specials.iter().map(|(name, id)| (name.clone(), json!(id))).collect();
-    let id_to_token_samples: Map<String, Value> =
-        [0u32, 1, 50, 255, 260, 290].iter().map(|&i| (i.to_string(), json!(tok.id_to_token(i)))).collect();
+    let special_tokens: Map<String, Value> = specials
+        .iter()
+        .map(|(name, id)| (name.clone(), json!(id)))
+        .collect();
+    let id_to_token_samples: Map<String, Value> = [0u32, 1, 50, 255, 260, 290]
+        .iter()
+        .map(|&i| (i.to_string(), json!(tok.id_to_token(i))))
+        .collect();
     let tok_fixtures = json!({
         "vocab_size": tok.get_vocab_size(),
         "bos_token_id": tok.get_bos_token_id(),
@@ -624,25 +767,36 @@ fn gen_model_data(out: &Path) -> Result<(GPTConfig, Tensors, Tokenizer)> {
 // core_model.safetensors)
 
 const WORDS: [&str; 16] = [
-    "the", "quick", "brown", "fox", "jumps", "over", "lazy", "dog",
-    "hello", "world", "numbers", "42", "100", "fine", "sure", "gone",
+    "the", "quick", "brown", "fox", "jumps", "over", "lazy", "dog", "hello", "world", "numbers",
+    "42", "100", "fine", "sure", "gone",
 ];
 
 fn make_text(rng: &mut StdRng, words: &[&str], n: usize) -> String {
-    let picked: Vec<&str> = (0..n).map(|_| words[rng.random_range(0..words.len())]).collect();
+    let picked: Vec<&str> = (0..n)
+        .map(|_| words[rng.random_range(0..words.len())])
+        .collect();
     picked.join(" ")
 }
 
-fn gen_train_data(out: &Path, config: &GPTConfig, weights: &Tensors, tok: &Tokenizer) -> Result<(GPTConfig, Tensors)> {
+fn gen_train_data(
+    out: &Path,
+    config: &GPTConfig,
+    weights: &Tensors,
+    tok: &Tokenizer,
+) -> Result<(GPTConfig, Tensors)> {
     let mut fx: Tensors = HashMap::new();
     let mut meta = Map::new();
 
     // Optimizer: AdamW group + Muon groups (wide and tall), 5 steps
     let mut g = StdRng::seed_from_u64(42);
     let shapes: [(&[usize], f32); 7] = [
-        (&[16, 8], 0.5), (&[5], 0.5), // AdamW
-        (&[8, 16], 0.1), (&[8, 16], 0.1), (&[8, 16], 0.1), // Muon wide
-        (&[16, 8], 0.1), (&[16, 8], 0.1), // Muon tall
+        (&[16, 8], 0.5),
+        (&[5], 0.5), // AdamW
+        (&[8, 16], 0.1),
+        (&[8, 16], 0.1),
+        (&[8, 16], 0.1), // Muon wide
+        (&[16, 8], 0.1),
+        (&[16, 8], 0.1), // Muon tall
     ];
     let mut vars = Vec::new();
     for (i, (shape, std)) in shapes.iter().enumerate() {
@@ -686,7 +840,9 @@ fn gen_train_data(out: &Path, config: &GPTConfig, weights: &Tensors, tok: &Token
     let loss = model.forward(&xb, Some(&yb), None, "mean")?;
     let grads = loss.backward()?;
     for (name, var) in &named {
-        let grad = grads.get(var).ok_or_else(|| anyhow::anyhow!("missing gradient for {name}"))?;
+        let grad = grads
+            .get(var)
+            .ok_or_else(|| anyhow::anyhow!("missing gradient for {name}"))?;
         fx.insert(format!("grad::{name}"), grad.clone());
     }
     fx.insert("grad_loss".into(), loss.reshape(1)?);
@@ -712,7 +868,10 @@ fn gen_train_data(out: &Path, config: &GPTConfig, weights: &Tensors, tok: &Token
 
     // token_bytes as written by tokenizer training: raw bytes per token, 0 for specials
     let token_bytes: Vec<i64> = tok.token_bytes().iter().map(|&b| b as i64).collect();
-    fx.insert("token_bytes_tok".into(), Tensor::from_vec(token_bytes, tok.get_vocab_size(), CPU)?);
+    fx.insert(
+        "token_bytes_tok".into(),
+        Tensor::from_vec(token_bytes, tok.get_vocab_size(), CPU)?,
+    );
 
     // Dataloader: tiny parquet shards (3 row groups of 4 documents each) + best-fit packing
     let shards = out.join("shards");
@@ -727,7 +886,9 @@ fn gen_train_data(out: &Path, config: &GPTConfig, weights: &Tensors, tok: &Token
         write_parquet(
             &shards.join(format!("shard_{shard_idx:05}.parquet")),
             "message schema { REQUIRED BYTE_ARRAY text (UTF8); }",
-            docs.chunks(4).map(|group| vec![Leaf::Str(group.to_vec())]).collect(),
+            docs.chunks(4)
+                .map(|group| vec![Leaf::Str(group.to_vec())])
+                .collect(),
         )?;
     }
     let mut loader = DataLoader::new(tok, 2, 32, "train", Some(&shards), 4, CPU, None, 8)?;
@@ -739,7 +900,17 @@ fn gen_train_data(out: &Path, config: &GPTConfig, weights: &Tensors, tok: &Token
         states.push(state);
     }
     // resume from the state after batch 1
-    let mut loader = DataLoader::new(tok, 2, 32, "train", Some(&shards), 4, CPU, Some(&states[1]), 8)?;
+    let mut loader = DataLoader::new(
+        tok,
+        2,
+        32,
+        "train",
+        Some(&shards),
+        4,
+        CPU,
+        Some(&states[1]),
+        8,
+    )?;
     let (inputs, targets, state) = loader.next_batch()?;
     fx.insert("dl_resume_inputs".into(), inputs);
     fx.insert("dl_resume_targets".into(), targets);
@@ -754,7 +925,9 @@ fn gen_train_data(out: &Path, config: &GPTConfig, weights: &Tensors, tok: &Token
 
     // evaluate_bpb (synthetic token_bytes over the model vocab) on the untrained weights
     let model = build_model(config, weights)?;
-    let token_bytes: Vec<i64> = (0..config.vocab_size as i64).map(|i| if i < 3 { 0 } else { i % 7 }).collect();
+    let token_bytes: Vec<i64> = (0..config.vocab_size as i64)
+        .map(|i| if i < 3 { 0 } else { i % 7 })
+        .collect();
     let token_bytes = Tensor::from_vec(token_bytes, config.vocab_size, CPU)?;
     let mut g = StdRng::seed_from_u64(33);
     let mut batches = Vec::new();
@@ -769,9 +942,15 @@ fn gen_train_data(out: &Path, config: &GPTConfig, weights: &Tensors, tok: &Token
         batches.push((x, y));
     }
     // per-position loss (loss_reduction='none')
-    fx.insert("loss_none".into(), model.forward(&batches[1].0, Some(&batches[1].1), None, "none")?);
+    fx.insert(
+        "loss_none".into(),
+        model.forward(&batches[1].0, Some(&batches[1].1), None, "none")?,
+    );
     let mut batch_iter = batches.into_iter().map(Ok);
-    meta.insert("bpb".into(), json!(evaluate_bpb(&model, &mut batch_iter, 2, &token_bytes)?));
+    meta.insert(
+        "bpb".into(),
+        json!(evaluate_bpb(&model, &mut batch_iter, 2, &token_bytes)?),
+    );
     fx.insert("bpb_token_bytes".into(), token_bytes);
 
     // core_eval: synthetic tasks, rendered prompts, fewshot sampling, task accuracies
@@ -779,12 +958,20 @@ fn gen_train_data(out: &Path, config: &GPTConfig, weights: &Tensors, tok: &Token
     let mut mc_data = Vec::new();
     for _ in 0..8 {
         let query = make_text(&mut g, &WORDS, 6) + "?";
-        let choices = [make_text(&mut g, &WORDS, 2), make_text(&mut g, &WORDS, 3), make_text(&mut g, &WORDS, 2)];
+        let choices = [
+            make_text(&mut g, &WORDS, 2),
+            make_text(&mut g, &WORDS, 3),
+            make_text(&mut g, &WORDS, 2),
+        ];
         mc_data.push(json!({"query": query, "choices": choices, "gold": g.random_range(0..3)}));
     }
     let mut schema_data = Vec::new();
     for _ in 0..8 {
-        let options = [make_text(&mut g, &WORDS, 4), make_text(&mut g, &WORDS, 5), make_text(&mut g, &WORDS, 4)];
+        let options = [
+            make_text(&mut g, &WORDS, 4),
+            make_text(&mut g, &WORDS, 5),
+            make_text(&mut g, &WORDS, 4),
+        ];
         let continuation = make_text(&mut g, &WORDS, 3);
         schema_data.push(json!({"context_options": options, "continuation": continuation, "gold": g.random_range(0..3)}));
     }
@@ -809,7 +996,8 @@ fn gen_train_data(out: &Path, config: &GPTConfig, weights: &Tensors, tok: &Token
         for idx in 0..4usize {
             let mut rng = PyRandom::new(1234 + idx as u64);
             let available: Vec<usize> = (0..n).filter(|&i| i != idx).collect();
-            sample_cases.push(json!({"n": n, "k": k, "idx": idx, "picked": rng.sample(&available, k)}));
+            sample_cases
+                .push(json!({"n": n, "k": k, "idx": idx, "picked": rng.sample(&available, k)}));
         }
     }
     meta.insert("core_sample_cases".into(), json!(sample_cases));
@@ -841,15 +1029,39 @@ fn gen_train_data(out: &Path, config: &GPTConfig, weights: &Tensors, tok: &Token
         }
     })?;
     candle_core::safetensors::save(&core_weights, out.join("core_model.safetensors"))?;
-    meta.insert("core_model_config".into(), serde_json::to_value(&core_config)?);
+    meta.insert(
+        "core_model_config".into(),
+        serde_json::to_value(&core_config)?,
+    );
     let core_model = build_model(&core_config, &core_weights)?;
     let mut task_accs = Map::new();
     for (name, data, task_meta) in [
-        ("mc", &mc_data, json!({"task_type": "multiple_choice", "num_fewshot": 2, "continuation_delimiter": ": "})),
-        ("schema", &schema_data, json!({"task_type": "schema", "num_fewshot": 0, "continuation_delimiter": " "})),
-        ("lm", &lm_data, json!({"task_type": "language_modeling", "num_fewshot": 1, "continuation_delimiter": ""})),
+        (
+            "mc",
+            &mc_data,
+            json!({"task_type": "multiple_choice", "num_fewshot": 2, "continuation_delimiter": ": "}),
+        ),
+        (
+            "schema",
+            &schema_data,
+            json!({"task_type": "schema", "num_fewshot": 0, "continuation_delimiter": " "}),
+        ),
+        (
+            "lm",
+            &lm_data,
+            json!({"task_type": "language_modeling", "num_fewshot": 1, "continuation_delimiter": ""}),
+        ),
     ] {
-        task_accs.insert(name.into(), json!(core_eval::evaluate_task(&core_model, tok, data, CPU, &task_meta)?));
+        task_accs.insert(
+            name.into(),
+            json!(core_eval::evaluate_task(
+                &core_model,
+                tok,
+                data,
+                CPU,
+                &task_meta
+            )?),
+        );
     }
     meta.insert("core_task_accs".into(), Value::Object(task_accs));
     meta.insert("core_mc_data".into(), json!(mc_data));
@@ -866,10 +1078,17 @@ fn gen_train_data(out: &Path, config: &GPTConfig, weights: &Tensors, tok: &Token
 // words_alpha.txt)
 
 fn conversations(task: &dyn Task) -> Result<Vec<Value>> {
-    Ok((0..task.len()).map(|i| task.get(i)).collect::<candle_core::Result<_>>()?)
+    Ok((0..task.len())
+        .map(|i| task.get(i))
+        .collect::<candle_core::Result<_>>()?)
 }
 
-fn gen_tasks_data(out: &Path, core_config: &GPTConfig, core_weights: &Tensors, tok: &Tokenizer) -> Result<()> {
+fn gen_tasks_data(
+    out: &Path,
+    core_config: &GPTConfig,
+    core_weights: &Tensors,
+    tok: &Tokenizer,
+) -> Result<()> {
     let mut meta = Map::new();
 
     // Synthetic dataset rows, standing in for the seed-42 shuffled hub datasets
@@ -886,12 +1105,14 @@ fn gen_tasks_data(out: &Path, core_config: &GPTConfig, core_weights: &Tensors, t
     arc_rows[3]["choices"]["label"] = json!(["1", "2", "3", "4"]); // ARC sometimes uses numbers
     arc_rows[3]["answerKey"] = json!("1");
     let mmlu_rows: Vec<Value> = (0..6)
-        .map(|i| json!({
-            "question": format!("Question number {i}?"),
-            "choices": ["opt0", "opt1", "opt2", "opt3"],
-            "answer": i % 4,
-            "subject": "anatomy",
-        }))
+        .map(|i| {
+            json!({
+                "question": format!("Question number {i}?"),
+                "choices": ["opt0", "opt1", "opt2", "opt3"],
+                "answer": i % 4,
+                "subject": "anatomy",
+            })
+        })
         .collect();
     let gsm8k_rows = vec![
         json!({"question": "Weng earns $12 an hour. She did 50 minutes. How much?",
@@ -930,21 +1151,27 @@ fn gen_tasks_data(out: &Path, core_config: &GPTConfig, core_weights: &Tensors, t
 
     // Hub loader: the same rows as parquet shards in the hub cache layout; the
     // expected rows are the originals in the seed-42 shuffled order
-    const LIST_OF_STR: &str = "(LIST) { REPEATED group list { REQUIRED BYTE_ARRAY element (UTF8); } }";
+    const LIST_OF_STR: &str =
+        "(LIST) { REPEATED group list { REQUIRED BYTE_ARRAY element (UTF8); } }";
     write_hub_cache(
-        out, "allenai/ai2_arc", "ARC-Easy", "test",
+        out,
+        "allenai/ai2_arc",
+        "ARC-Easy",
+        "test",
         &format!(
             "message schema {{ REQUIRED BYTE_ARRAY question (UTF8); REQUIRED group choices {{ \
              REQUIRED group text {LIST_OF_STR} REQUIRED group label {LIST_OF_STR} }} \
              REQUIRED BYTE_ARRAY answerKey (UTF8); }}"
         ),
         &[&arc_rows[..4], &arc_rows[4..]], // two shards
-        |rows| vec![
-            str_column(rows, "question"),
-            Leaf::StrList(rows.iter().map(|r| strs(&r["choices"]["text"])).collect()),
-            Leaf::StrList(rows.iter().map(|r| strs(&r["choices"]["label"])).collect()),
-            str_column(rows, "answerKey"),
-        ],
+        |rows| {
+            vec![
+                str_column(rows, "question"),
+                Leaf::StrList(rows.iter().map(|r| strs(&r["choices"]["text"])).collect()),
+                Leaf::StrList(rows.iter().map(|r| strs(&r["choices"]["label"])).collect()),
+                str_column(rows, "answerKey"),
+            ]
+        },
     )?;
     write_hub_cache(
         out, "cais/mmlu", "all", "test",
@@ -963,7 +1190,14 @@ fn gen_tasks_data(out: &Path, core_config: &GPTConfig, core_weights: &Tensors, t
     let message_fields = |rows: &[Value], key: &str| -> Leaf {
         Leaf::StrList(
             rows.iter()
-                .map(|r| r["messages"].as_array().unwrap().iter().map(|m| m[key].as_str().unwrap().to_string()).collect())
+                .map(|r| {
+                    r["messages"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|m| m[key].as_str().unwrap().to_string())
+                        .collect()
+                })
                 .collect(),
         )
     };
@@ -975,12 +1209,18 @@ fn gen_tasks_data(out: &Path, core_config: &GPTConfig, core_weights: &Tensors, t
         |rows| vec![message_fields(rows, "role"), message_fields(rows, "content")],
     )?;
     let hub_arc = ARC::from_rows(hub::shuffle(arc_rows.clone(), 42), Slice::default());
-    meta.insert("hub_arc_conversations".into(), json!(conversations(&hub_arc)?));
-    meta.insert("hub_shuffled".into(), json!({
-        "arc": hub::shuffle(arc_rows.clone(), 42),
-        "mmlu": hub::shuffle(mmlu_rows.clone(), 42),
-        "smoltalk": hub::shuffle(smoltalk_rows.clone(), 42),
-    }));
+    meta.insert(
+        "hub_arc_conversations".into(),
+        json!(conversations(&hub_arc)?),
+    );
+    meta.insert(
+        "hub_shuffled".into(),
+        json!({
+            "arc": hub::shuffle(arc_rows.clone(), 42),
+            "mmlu": hub::shuffle(mmlu_rows.clone(), 42),
+            "smoltalk": hub::shuffle(smoltalk_rows.clone(), 42),
+        }),
+    );
 
     // Conversations, evaluation outcomes, slicing
     let arc = ARC::from_rows(arc_rows.clone(), Slice::default());
@@ -991,12 +1231,21 @@ fn gen_tasks_data(out: &Path, core_config: &GPTConfig, core_weights: &Tensors, t
 
     let letters = ["A".to_string(), "B".to_string()];
     let choices = ["because".to_string(), "why not".to_string()];
-    meta.insert("render_mc".into(), json!(render_mc("Why?", &letters, &choices)));
+    meta.insert(
+        "render_mc".into(),
+        json!(render_mc("Why?", &letters, &choices)),
+    );
     meta.insert("arc_conversations".into(), json!(conversations(&arc)?));
     meta.insert("mmlu_conversations".into(), json!(conversations(&mmlu)?));
     meta.insert("gsm8k_conversations".into(), json!(conversations(&gsm8k)?));
-    meta.insert("humaneval_conversations".into(), json!(conversations(&humaneval)?));
-    meta.insert("smoltalk_conversations".into(), json!(conversations(&smoltalk)?));
+    meta.insert(
+        "humaneval_conversations".into(),
+        json!(conversations(&humaneval)?),
+    );
+    meta.insert(
+        "smoltalk_conversations".into(),
+        json!(conversations(&smoltalk)?),
+    );
 
     let mut arc_eval = Vec::new();
     for (idx, response) in [(0, "A"), (0, "B"), (3, "1")] {
@@ -1006,25 +1255,46 @@ fn gen_tasks_data(out: &Path, core_config: &GPTConfig, core_weights: &Tensors, t
     meta.insert("arc_eval".into(), json!(arc_eval));
     let mut gsm8k_eval = Vec::new();
     for (idx, response) in [
-        (0, "Lots of math.\n#### 10"), (0, "#### 1,0"), (0, "no answer at all"),
-        (2, "#### 1234"), (3, "#### -5.5"),
+        (0, "Lots of math.\n#### 10"),
+        (0, "#### 1,0"),
+        (0, "no answer at all"),
+        (2, "#### 1234"),
+        (3, "#### -5.5"),
     ] {
         let outcome = gsm8k.evaluate(&gsm8k.get(idx)?, response)?;
         gsm8k_eval.push(json!({"idx": idx, "response": response, "outcome": outcome as i64}));
     }
     meta.insert("gsm8k_eval".into(), json!(gsm8k_eval));
     let conv0 = gsm8k.get(0)?;
-    meta.insert("gsm8k_rewards".into(), json!([gsm8k.reward(&conv0, "#### 10")?, gsm8k.reward(&conv0, "#### 9")?]));
-    let extract_answer_cases: Vec<Value> = ["#### 42", "x #### 1,234.5 y", "#### -7", "nothing", "a #### 1 b #### 2"]
-        .iter()
-        .map(|t| json!({"text": t, "answer": extract_answer(t)}))
-        .collect();
+    meta.insert(
+        "gsm8k_rewards".into(),
+        json!([
+            gsm8k.reward(&conv0, "#### 10")?,
+            gsm8k.reward(&conv0, "#### 9")?
+        ]),
+    );
+    let extract_answer_cases: Vec<Value> = [
+        "#### 42",
+        "x #### 1,234.5 y",
+        "#### -7",
+        "nothing",
+        "a #### 1 b #### 2",
+    ]
+    .iter()
+    .map(|t| json!({"text": t, "answer": extract_answer(t)}))
+    .collect();
     meta.insert("extract_answer_cases".into(), json!(extract_answer_cases));
 
     // humaneval: correct and broken completions through the real executor
     let he_conv = humaneval.get(0)?;
-    let he_prompt = he_conv["messages"][0]["content"].as_str().unwrap().to_string();
-    let correct_completion = he_conv["messages"][1]["content"].as_str().unwrap().to_string();
+    let he_prompt = he_conv["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let correct_completion = he_conv["messages"][1]["content"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let broken_completion = "```python\ndef add(a, b):\n    return a - b\n```".to_string();
     let mut humaneval_eval = Vec::new();
     for response in [correct_completion, broken_completion] {
@@ -1032,11 +1302,13 @@ fn gen_tasks_data(out: &Path, core_config: &GPTConfig, core_weights: &Tensors, t
         humaneval_eval.push(json!({"response": response, "outcome": outcome}));
     }
     meta.insert("humaneval_eval".into(), json!(humaneval_eval));
-    let extract_imports_cases: Vec<Value> =
-        [he_prompt.as_str(), "import os\nfrom sys import path\n# comment\nimport re\nx = 1\nimport late"]
-            .iter()
-            .map(|t| json!({"text": t, "imports": extract_imports(t)}))
-            .collect();
+    let extract_imports_cases: Vec<Value> = [
+        he_prompt.as_str(),
+        "import os\nfrom sys import path\n# comment\nimport re\nx = 1\nimport late",
+    ]
+    .iter()
+    .map(|t| json!({"text": t, "imports": extract_imports(t)}))
+    .collect();
     meta.insert("extract_imports_cases".into(), json!(extract_imports_cases));
     let extract_program_cases: Vec<Value> = [
         "```python\nx = 1\n```",
@@ -1052,25 +1324,50 @@ fn gen_tasks_data(out: &Path, core_config: &GPTConfig, core_weights: &Tensors, t
     // slicing + mixture
     let sliced = MMLU::from_rows(mmlu_rows.clone(), Slice::new(1, Some(6), 2));
     meta.insert("sliced_len".into(), json!(sliced.len()));
-    meta.insert("sliced_conversations".into(), json!(conversations(&sliced)?));
+    meta.insert(
+        "sliced_conversations".into(),
+        json!(conversations(&sliced)?),
+    );
     let mixture = TaskMixture::new(vec![
         Box::new(ARC::from_rows(arc_rows.clone(), Slice::default())),
         Box::new(MMLU::from_rows(mmlu_rows.clone(), Slice::default())),
     ]);
     meta.insert("mixture_len".into(), json!(mixture.len()));
-    meta.insert("mixture_conversations".into(), json!(conversations(&mixture)?));
+    meta.insert(
+        "mixture_conversations".into(),
+        json!(conversations(&mixture)?),
+    );
 
     // SpellingBee / SimpleSpelling with a synthetic word list
     let words = [
-        "strawberry", "banana", "letter", "mississippi", "queue", "rhythm",
-        "bookkeeper", "committee", "balloon", "coffee", "pepper", "success",
-        "assess", "footloose", "deed", "noon", "level", "radar", "kayak", "stats",
+        "strawberry",
+        "banana",
+        "letter",
+        "mississippi",
+        "queue",
+        "rhythm",
+        "bookkeeper",
+        "committee",
+        "balloon",
+        "coffee",
+        "pepper",
+        "success",
+        "assess",
+        "footloose",
+        "deed",
+        "noon",
+        "level",
+        "radar",
+        "kayak",
+        "stats",
     ];
     std::fs::write(out.join("words_alpha.txt"), words.join("\n") + "\n")?;
     let bee_train = SpellingBee::new(1000, "train", Slice::default())?;
     let bee_test = SpellingBee::new(1000, "test", Slice::default())?;
     let first = |task: &dyn Task, n: usize| -> Result<Vec<Value>> {
-        Ok((0..n).map(|i| task.get(i)).collect::<candle_core::Result<_>>()?)
+        Ok((0..n)
+            .map(|i| task.get(i))
+            .collect::<candle_core::Result<_>>()?)
     };
     meta.insert("spellingbee_train".into(), json!(first(&bee_train, 8)?));
     meta.insert("spellingbee_test".into(), json!(first(&bee_test, 4)?));
@@ -1086,11 +1383,16 @@ fn gen_tasks_data(out: &Path, core_config: &GPTConfig, core_weights: &Tensors, t
 
     // chat_eval loops on the tiny core model + test tokenizer
     let model = build_model(core_config, core_weights)?;
-    meta.insert("chat_eval_categorical_acc".into(), json!(run_categorical_eval(&arc, tok, &model, 2, None)?));
+    meta.insert(
+        "chat_eval_categorical_acc".into(),
+        json!(run_categorical_eval(&arc, tok, &model, 2, None)?),
+    );
     let engine = Engine::new(&model, tok);
     meta.insert(
         "chat_eval_generative_acc".into(),
-        json!(run_generative_eval(&gsm8k, tok, &model, &engine, 1, 8, 0.0, 50, None)?),
+        json!(run_generative_eval(
+            &gsm8k, tok, &model, &engine, 1, 8, 0.0, 50, None
+        )?),
     );
 
     // base_eval.evaluate_core over a synthetic eval bundle
@@ -1099,8 +1401,13 @@ fn gen_tasks_data(out: &Path, core_config: &GPTConfig, core_weights: &Tensors, t
     let mut core_mc_items = Vec::new();
     for _ in 0..10 {
         let query = make_text(&mut g, &words, 5) + "?";
-        let choices = [make_text(&mut g, &words, 1), make_text(&mut g, &words, 1), make_text(&mut g, &words, 1)];
-        core_mc_items.push(json!({"query": query, "choices": choices, "gold": g.random_range(0..3)}));
+        let choices = [
+            make_text(&mut g, &words, 1),
+            make_text(&mut g, &words, 1),
+            make_text(&mut g, &words, 1),
+        ];
+        core_mc_items
+            .push(json!({"query": query, "choices": choices, "gold": g.random_range(0..3)}));
     }
     let mut core_lm_items = Vec::new();
     for _ in 0..10 {
@@ -1108,8 +1415,14 @@ fn gen_tasks_data(out: &Path, core_config: &GPTConfig, core_weights: &Tensors, t
         let continuation = format!(" {}", make_text(&mut g, &words, 1));
         core_lm_items.push(json!({"context": context, "continuation": continuation}));
     }
-    write_jsonl(&bundle_dir.join("eval_data").join("tiny_mc.jsonl"), &core_mc_items)?;
-    write_jsonl(&bundle_dir.join("eval_data").join("tiny_lm.jsonl"), &core_lm_items)?;
+    write_jsonl(
+        &bundle_dir.join("eval_data").join("tiny_mc.jsonl"),
+        &core_mc_items,
+    )?;
+    write_jsonl(
+        &bundle_dir.join("eval_data").join("tiny_lm.jsonl"),
+        &core_lm_items,
+    )?;
     std::fs::write(
         bundle_dir.join("core.yaml"),
         "icl_tasks:\n\
@@ -1120,7 +1433,10 @@ fn gen_tasks_data(out: &Path, core_config: &GPTConfig, core_weights: &Tensors, t
         bundle_dir.join("eval_meta_data.csv"),
         "Eval Task,Random baseline\ntiny_mc,33.3\ntiny_lm,0.0\n",
     )?;
-    meta.insert("evaluate_core".into(), nanochat::base_eval::evaluate_core(&model, tok, CPU, 8)?);
+    meta.insert(
+        "evaluate_core".into(),
+        nanochat::base_eval::evaluate_core(&model, tok, CPU, 8)?,
+    );
 
     // SFT bestfit-pad batches (the chat_sft packing logic)
     let sft_mixture = TaskMixture::new(vec![
@@ -1131,7 +1447,9 @@ fn gen_tasks_data(out: &Path, core_config: &GPTConfig, core_weights: &Tensors, t
     let mut sft_batches = Vec::new();
     for _ in 0..3 {
         let (inputs, targets) = sft_loader.next_batch()?;
-        sft_batches.push(json!({"inputs": inputs.to_vec2::<i64>()?, "targets": targets.to_vec2::<i64>()?}));
+        sft_batches.push(
+            json!({"inputs": inputs.to_vec2::<i64>()?, "targets": targets.to_vec2::<i64>()?}),
+        );
     }
     meta.insert("sft_batches".into(), json!(sft_batches));
 
@@ -1142,7 +1460,9 @@ fn gen_tasks_data(out: &Path, core_config: &GPTConfig, core_weights: &Tensors, t
 fn main() -> Result<()> {
     let out = match std::env::args().nth(1) {
         Some(dir) => PathBuf::from(dir),
-        None => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests").join("data"),
+        None => PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("data"),
     };
     std::fs::create_dir_all(&out)?;
     let out = out.canonicalize()?;

@@ -48,10 +48,17 @@ fn field_to_json(field: &Field) -> Result<Value> {
         Field::Double(v) => Value::from(*v),
         Field::Str(v) => Value::from(v.as_str()),
         Field::Group(row) => row_to_json(row)?,
-        Field::ListInternal(list) => {
-            Value::Array(list.elements().iter().map(field_to_json).collect::<Result<_>>()?)
+        Field::ListInternal(list) => Value::Array(
+            list.elements()
+                .iter()
+                .map(field_to_json)
+                .collect::<Result<_>>()?,
+        ),
+        other => {
+            return Err(msg(format!(
+                "unsupported parquet value in task dataset: {other:?}"
+            )))
         }
-        other => return Err(msg(format!("unsupported parquet value in task dataset: {other:?}"))),
     })
 }
 
@@ -65,7 +72,8 @@ fn row_to_json(row: &Row) -> Result<Value> {
 
 /// All rows of a parquet file, each as a JSON object keyed by column name.
 pub fn read_parquet_rows(path: &Path) -> Result<Vec<Value>> {
-    let file = File::open(path).map_err(|e| msg(format!("Error opening {}: {e}", path.display())))?;
+    let file =
+        File::open(path).map_err(|e| msg(format!("Error opening {}: {e}", path.display())))?;
     let reader = SerializedFileReader::new(file).map_err(msg)?;
     let mut rows = Vec::with_capacity(reader.metadata().file_metadata().num_rows().max(0) as usize);
     for row in reader.get_row_iter(None).map_err(msg)? {
@@ -77,12 +85,18 @@ pub fn read_parquet_rows(path: &Path) -> Result<Vec<Value>> {
 /// Download the parquet shards of a dataset split into `shards_dir`, unless
 /// already there. The manifest is written last, so its existence means the
 /// download completed.
-fn ensure_downloaded(repo_id: &str, subset: &str, split: &str, shards_dir: &Path) -> Result<Vec<PathBuf>> {
+fn ensure_downloaded(
+    repo_id: &str,
+    subset: &str,
+    split: &str,
+    shards_dir: &Path,
+) -> Result<Vec<PathBuf>> {
     let manifest_path = shards_dir.join("manifest.json");
     if !manifest_path.exists() {
         std::fs::create_dir_all(shards_dir).map_err(msg)?;
         let client = http_client()?;
-        let listing_url = format!("https://huggingface.co/api/datasets/{repo_id}/parquet/{subset}/{split}");
+        let listing_url =
+            format!("https://huggingface.co/api/datasets/{repo_id}/parquet/{subset}/{split}");
         let listing = client
             .get(&listing_url)
             .send()
@@ -106,7 +120,11 @@ fn ensure_downloaded(repo_id: &str, subset: &str, split: &str, shards_dir: &Path
             std::fs::rename(&temp_path, shards_dir.join(&filename)).map_err(msg)?;
             filenames.push(filename);
         }
-        std::fs::write(&manifest_path, serde_json::to_string(&filenames).map_err(msg)?).map_err(msg)?;
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_string(&filenames).map_err(msg)?,
+        )
+        .map_err(msg)?;
     }
     let manifest = std::fs::read_to_string(&manifest_path).map_err(msg)?;
     let filenames: Vec<String> = serde_json::from_str(&manifest).map_err(msg)?;
@@ -117,7 +135,11 @@ fn ensure_downloaded(repo_id: &str, subset: &str, split: &str, shards_dir: &Path
 /// named subsets use the subset "default" (or their single config name).
 pub fn load_hub_dataset(repo_id: &str, subset: &str, split: &str) -> Result<Vec<Value>> {
     let slug = repo_id.replace('/', "--");
-    let shards_dir = get_base_dir().join("task_data").join(slug).join(subset).join(split);
+    let shards_dir = get_base_dir()
+        .join("task_data")
+        .join(slug)
+        .join(subset)
+        .join(split);
     let mut rows = Vec::new();
     for path in ensure_downloaded(repo_id, subset, split, &shards_dir)? {
         rows.extend(read_parquet_rows(&path)?);
@@ -131,7 +153,11 @@ pub fn shuffle(rows: Vec<Value>, seed: u64) -> Vec<Value> {
     let mut rows: Vec<Option<Value>> = rows.into_iter().map(Some).collect();
     permutation(seed, rows.len())
         .into_iter()
-        .map(|physical_index| rows[physical_index].take().expect("permutation visits each row once"))
+        .map(|physical_index| {
+            rows[physical_index]
+                .take()
+                .expect("permutation visits each row once")
+        })
         .collect()
 }
 

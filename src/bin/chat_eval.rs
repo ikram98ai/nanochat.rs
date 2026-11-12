@@ -64,8 +64,13 @@ fn main() -> anyhow::Result<()> {
     };
     let (_ddp, _rank, _local, _world, device) = compute_init(&device_type)?;
 
-    let (model, tokenizer, _meta) =
-        load_model(&args.source, &device, "eval", args.model_tag.as_deref(), args.step)?;
+    let (model, tokenizer, _meta) = load_model(
+        &args.source,
+        &device,
+        "eval",
+        args.model_tag.as_deref(),
+        args.step,
+    )?;
     let engine = Engine::new(&model, &tokenizer);
 
     // Get the tasks to evaluate on (SpellingBee is not part of ChatCORE, but can
@@ -101,8 +106,9 @@ fn main() -> anyhow::Result<()> {
     }
 
     // ChatCORE metric: mean centered accuracy, 0 at random baseline to 1 at peak
-    let all_tasks_were_evaluated =
-        all_tasks.iter().all(|t| results.iter().any(|(name, _)| name == t));
+    let all_tasks_were_evaluated = all_tasks
+        .iter()
+        .all(|t| results.iter().any(|(name, _)| name == t));
     if all_tasks_were_evaluated {
         let mut centered_mean = 0.0;
         for (task_name, acc) in &results {

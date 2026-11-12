@@ -27,7 +27,9 @@ use nanochat::tasks::spellingbee::{SimpleSpelling, SpellingBee};
 use nanochat::tokenizer::Tokenizer;
 
 fn data_dir() -> PathBuf {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests").join("data");
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("data");
     assert!(dir.join("meta.json").exists(), "tests/data is generated, not checked in: run `cargo run --release --example gen_test_data` first");
     dir
 }
@@ -58,7 +60,10 @@ fn test_render_mc() {
     let meta = load_meta();
     let letters = vec!["A".to_string(), "B".to_string()];
     let choices = vec!["because".to_string(), "why not".to_string()];
-    assert_eq!(render_mc("Why?", &letters, &choices), meta["render_mc"].as_str().unwrap());
+    assert_eq!(
+        render_mc("Why?", &letters, &choices),
+        meta["render_mc"].as_str().unwrap()
+    );
 }
 
 /// The hub loader reads parquet shards from the cache (same layout as the
@@ -77,7 +82,10 @@ fn test_hub_loader() {
     }
     // the real task constructor, end to end
     let arc = ARC::new("ARC-Easy", "test", Slice::default()).unwrap();
-    assert_eq!(Value::Array(conversations(&arc)), meta["hub_arc_conversations"]);
+    assert_eq!(
+        Value::Array(conversations(&arc)),
+        meta["hub_arc_conversations"]
+    );
 }
 
 #[test]
@@ -85,11 +93,23 @@ fn test_task_conversations() {
     set_base_dir();
     let meta = load_meta();
     let arc = ARC::from_rows(rows("arc_ARC-Easy_test"), Slice::default());
-    assert_eq!(serde_json::json!(conversations(&arc)), meta["arc_conversations"], "arc");
+    assert_eq!(
+        serde_json::json!(conversations(&arc)),
+        meta["arc_conversations"],
+        "arc"
+    );
     let mmlu = MMLU::from_rows(rows("mmlu_all_test"), Slice::default());
-    assert_eq!(serde_json::json!(conversations(&mmlu)), meta["mmlu_conversations"], "mmlu");
+    assert_eq!(
+        serde_json::json!(conversations(&mmlu)),
+        meta["mmlu_conversations"],
+        "mmlu"
+    );
     let gsm8k = GSM8K::from_rows(rows("gsm8k_main_test"), Slice::default());
-    assert_eq!(serde_json::json!(conversations(&gsm8k)), meta["gsm8k_conversations"], "gsm8k");
+    assert_eq!(
+        serde_json::json!(conversations(&gsm8k)),
+        meta["gsm8k_conversations"],
+        "gsm8k"
+    );
     let humaneval = HumanEval::from_rows(rows("humaneval_test"), Slice::default());
     assert_eq!(
         serde_json::json!(conversations(&humaneval)),
@@ -112,15 +132,27 @@ fn test_task_evaluate() {
     for case in meta["arc_eval"].as_array().unwrap() {
         let idx = case["idx"].as_u64().unwrap() as usize;
         let conv = arc.get(idx).unwrap();
-        let outcome = arc.evaluate(&conv, case["response"].as_str().unwrap()).unwrap();
-        assert_eq!(outcome, case["outcome"].as_bool().unwrap(), "arc_eval {case}");
+        let outcome = arc
+            .evaluate(&conv, case["response"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(
+            outcome,
+            case["outcome"].as_bool().unwrap(),
+            "arc_eval {case}"
+        );
     }
     let gsm8k = GSM8K::from_rows(rows("gsm8k_main_test"), Slice::default());
     for case in meta["gsm8k_eval"].as_array().unwrap() {
         let idx = case["idx"].as_u64().unwrap() as usize;
         let conv = gsm8k.get(idx).unwrap();
-        let outcome = gsm8k.evaluate(&conv, case["response"].as_str().unwrap()).unwrap();
-        assert_eq!(outcome as i64, case["outcome"].as_i64().unwrap(), "gsm8k_eval {case}");
+        let outcome = gsm8k
+            .evaluate(&conv, case["response"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(
+            outcome as i64,
+            case["outcome"].as_i64().unwrap(),
+            "gsm8k_eval {case}"
+        );
     }
     let conv = gsm8k.get(0).unwrap();
     let expected: Vec<f64> = serde_json::from_value(meta["gsm8k_rewards"].clone()).unwrap();
@@ -156,8 +188,14 @@ fn test_humaneval_execution() {
     let humaneval = HumanEval::from_rows(rows("humaneval_test"), Slice::default());
     let conv = humaneval.get(0).unwrap();
     for case in meta["humaneval_eval"].as_array().unwrap() {
-        let outcome = humaneval.evaluate(&conv, case["response"].as_str().unwrap()).unwrap();
-        assert_eq!(outcome, case["outcome"].as_bool().unwrap(), "humaneval response");
+        let outcome = humaneval
+            .evaluate(&conv, case["response"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(
+            outcome,
+            case["outcome"].as_bool().unwrap(),
+            "humaneval response"
+        );
     }
 }
 
@@ -167,14 +205,20 @@ fn test_slicing_and_mixture() {
     let meta = load_meta();
     let sliced = MMLU::from_rows(rows("mmlu_all_test"), Slice::new(1, Some(6), 2));
     assert_eq!(sliced.len() as u64, meta["sliced_len"].as_u64().unwrap());
-    assert_eq!(serde_json::json!(conversations(&sliced)), meta["sliced_conversations"]);
+    assert_eq!(
+        serde_json::json!(conversations(&sliced)),
+        meta["sliced_conversations"]
+    );
 
     let mixture = TaskMixture::new(vec![
         Box::new(ARC::from_rows(rows("arc_ARC-Easy_test"), Slice::default())),
         Box::new(MMLU::from_rows(rows("mmlu_all_test"), Slice::default())),
     ]);
     assert_eq!(mixture.len() as u64, meta["mixture_len"].as_u64().unwrap());
-    assert_eq!(serde_json::json!(conversations(&mixture)), meta["mixture_conversations"]);
+    assert_eq!(
+        serde_json::json!(conversations(&mixture)),
+        meta["mixture_conversations"]
+    );
 }
 
 #[test]
@@ -182,21 +226,46 @@ fn test_spellingbee() {
     set_base_dir();
     let meta = load_meta();
     let bee_train = SpellingBee::new(1000, "train", Slice::default()).unwrap();
-    for (i, expected) in meta["spellingbee_train"].as_array().unwrap().iter().enumerate() {
-        assert_eq!(&bee_train.get(i).unwrap(), expected, "spellingbee train {i}");
+    for (i, expected) in meta["spellingbee_train"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+    {
+        assert_eq!(
+            &bee_train.get(i).unwrap(),
+            expected,
+            "spellingbee train {i}"
+        );
     }
     let bee_test = SpellingBee::new(1000, "test", Slice::default()).unwrap();
-    for (i, expected) in meta["spellingbee_test"].as_array().unwrap().iter().enumerate() {
+    for (i, expected) in meta["spellingbee_test"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+    {
         assert_eq!(&bee_test.get(i).unwrap(), expected, "spellingbee test {i}");
     }
     let conv = bee_train.get(0).unwrap();
     for case in meta["spellingbee_eval"].as_array().unwrap() {
-        let outcome = bee_train.evaluate(&conv, case["response"].as_str().unwrap()).unwrap();
+        let outcome = bee_train
+            .evaluate(&conv, case["response"].as_str().unwrap())
+            .unwrap();
         assert_eq!(outcome as i64, case["outcome"].as_i64().unwrap());
     }
     let simple = SimpleSpelling::new(1000, "train", Slice::default()).unwrap();
-    for (i, expected) in meta["simplespelling_train"].as_array().unwrap().iter().enumerate() {
-        assert_eq!(&simple.get(i).unwrap(), expected, "simplespelling train {i}");
+    for (i, expected) in meta["simplespelling_train"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+    {
+        assert_eq!(
+            &simple.get(i).unwrap(),
+            expected,
+            "simplespelling train {i}"
+        );
     }
 }
 
@@ -211,14 +280,32 @@ fn test_sft_dataloader() {
         Box::new(SmolTalk::from_rows(rows("smoltalk_test"), Slice::default())),
         Box::new(MMLU::from_rows(rows("mmlu_all_test"), Slice::default())),
     ]);
-    let mut loader =
-        nanochat::dataloader::SftDataLoader::new(&mixture, &tokenizer, 2, 64, true, -1, &Device::Cpu, 6);
+    let mut loader = nanochat::dataloader::SftDataLoader::new(
+        &mixture,
+        &tokenizer,
+        2,
+        64,
+        true,
+        -1,
+        &Device::Cpu,
+        6,
+    );
     for (i, expected) in meta["sft_batches"].as_array().unwrap().iter().enumerate() {
         let (inputs, targets) = loader.next_batch().unwrap();
-        let expected_inputs: Vec<Vec<i64>> = serde_json::from_value(expected["inputs"].clone()).unwrap();
-        let expected_targets: Vec<Vec<i64>> = serde_json::from_value(expected["targets"].clone()).unwrap();
-        assert_eq!(inputs.to_vec2::<i64>().unwrap(), expected_inputs, "sft inputs batch {i}");
-        assert_eq!(targets.to_vec2::<i64>().unwrap(), expected_targets, "sft targets batch {i}");
+        let expected_inputs: Vec<Vec<i64>> =
+            serde_json::from_value(expected["inputs"].clone()).unwrap();
+        let expected_targets: Vec<Vec<i64>> =
+            serde_json::from_value(expected["targets"].clone()).unwrap();
+        assert_eq!(
+            inputs.to_vec2::<i64>().unwrap(),
+            expected_inputs,
+            "sft inputs batch {i}"
+        );
+        assert_eq!(
+            targets.to_vec2::<i64>().unwrap(),
+            expected_targets,
+            "sft targets batch {i}"
+        );
     }
 }
 
@@ -229,7 +316,8 @@ fn test_evaluate_core_bundle() {
     let train_meta: Value =
         serde_json::from_str(&std::fs::read_to_string(data_dir().join("train_meta.json")).unwrap())
             .unwrap();
-    let config: GPTConfig = serde_json::from_value(train_meta["core_model_config"].clone()).unwrap();
+    let config: GPTConfig =
+        serde_json::from_value(train_meta["core_model_config"].clone()).unwrap();
     let weights =
         candle_core::safetensors::load(data_dir().join("core_model.safetensors"), &Device::Cpu)
             .unwrap();
@@ -240,14 +328,24 @@ fn test_evaluate_core_bundle() {
     let results = nanochat::base_eval::evaluate_core(&model, &tokenizer, &Device::Cpu, 8).unwrap();
     let expected = &meta["evaluate_core"];
     for (label, acc) in expected["results"].as_object().unwrap() {
-        assert_eq!(results["results"][label].as_f64(), acc.as_f64(), "accuracy {label}");
+        assert_eq!(
+            results["results"][label].as_f64(),
+            acc.as_f64(),
+            "accuracy {label}"
+        );
     }
     for (label, centered) in expected["centered_results"].as_object().unwrap() {
         let actual = results["centered_results"][label].as_f64().unwrap();
-        assert!((actual - centered.as_f64().unwrap()).abs() < 1e-12, "centered {label}");
+        assert!(
+            (actual - centered.as_f64().unwrap()).abs() < 1e-12,
+            "centered {label}"
+        );
     }
     let core = results["core_metric"].as_f64().unwrap();
-    assert!((core - expected["core_metric"].as_f64().unwrap()).abs() < 1e-12, "core_metric");
+    assert!(
+        (core - expected["core_metric"].as_f64().unwrap()).abs() < 1e-12,
+        "core_metric"
+    );
 }
 
 #[test]
@@ -258,7 +356,8 @@ fn test_chat_eval_loops() {
     let train_meta: Value =
         serde_json::from_str(&std::fs::read_to_string(data_dir().join("train_meta.json")).unwrap())
             .unwrap();
-    let config: GPTConfig = serde_json::from_value(train_meta["core_model_config"].clone()).unwrap();
+    let config: GPTConfig =
+        serde_json::from_value(train_meta["core_model_config"].clone()).unwrap();
     let weights =
         candle_core::safetensors::load(data_dir().join("core_model.safetensors"), &Device::Cpu)
             .unwrap();
@@ -268,11 +367,19 @@ fn test_chat_eval_loops() {
 
     let arc = ARC::from_rows(rows("arc_ARC-Easy_test"), Slice::default());
     let acc = run_categorical_eval(&arc, &tokenizer, &model, 2, None).unwrap();
-    assert_eq!(acc, meta["chat_eval_categorical_acc"].as_f64().unwrap(), "categorical acc");
+    assert_eq!(
+        acc,
+        meta["chat_eval_categorical_acc"].as_f64().unwrap(),
+        "categorical acc"
+    );
 
     let gsm8k = GSM8K::from_rows(rows("gsm8k_main_test"), Slice::default());
     let engine = Engine::new(&model, &tokenizer);
     let acc =
         run_generative_eval(&gsm8k, &tokenizer, &model, &engine, 1, 8, 0.0, 50, None).unwrap();
-    assert_eq!(acc, meta["chat_eval_generative_acc"].as_f64().unwrap(), "generative acc");
+    assert_eq!(
+        acc,
+        meta["chat_eval_generative_acc"].as_f64().unwrap(),
+        "generative acc"
+    );
 }

@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 
-use candle_core::{D, DType, IndexOp, Result, Tensor, Var};
+use candle_core::{DType, IndexOp, Result, Tensor, Var, D};
 
 /// Coefficients for Polar Express (computed for num_iters=5, safety_factor=2e-2, cushion=2)
 /// From https://arxiv.org/pdf/2505.16932
@@ -48,7 +48,13 @@ pub struct ParamGroup {
 }
 
 impl ParamGroup {
-    pub fn adamw(params: Vec<Var>, lr: f64, betas: (f64, f64), eps: f64, weight_decay: f64) -> Self {
+    pub fn adamw(
+        params: Vec<Var>,
+        lr: f64,
+        betas: (f64, f64),
+        eps: f64,
+        weight_decay: f64,
+    ) -> Self {
         Self {
             kind: GroupKind::AdamW,
             params,
@@ -285,7 +291,11 @@ impl MuonAdamW {
             std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
             std::collections::hash_map::Entry::Vacant(e) => {
                 // Second momentum buffer is factored, either per-row or per-column
-                let state_shape = if m >= n { (num_params, m, 1) } else { (num_params, 1, n) };
+                let state_shape = if m >= n {
+                    (num_params, m, 1)
+                } else {
+                    (num_params, 1, n)
+                };
                 e.insert(MuonState {
                     momentum_buffer: Tensor::zeros((num_params, m, n), dtype, &device)?,
                     second_momentum_buffer: Tensor::zeros(state_shape, dtype, &device)?,
@@ -304,8 +314,13 @@ impl MuonAdamW {
             })
             .collect::<Result<_>>()?;
         let stacked_grads = Tensor::stack(&grads, 0)?;
-        let stacked_params =
-            Tensor::stack(&params.iter().map(|p| p.as_tensor().clone()).collect::<Vec<_>>(), 0)?;
+        let stacked_params = Tensor::stack(
+            &params
+                .iter()
+                .map(|p| p.as_tensor().clone())
+                .collect::<Vec<_>>(),
+            0,
+        )?;
 
         // Boost the LR for tall matrices
         let lr = group.lr * (m as f64 / n as f64).max(1.0).sqrt();
@@ -359,13 +374,22 @@ impl MuonAdamW {
         let mut out = HashMap::new();
         let device = candle_core::Device::Cpu;
         for ((gi, pi), st) in &self.adamw_state {
-            out.insert(format!("adamw.{gi}.{pi}.step"), Tensor::from_vec(vec![st.step as i64], 1, &device)?);
+            out.insert(
+                format!("adamw.{gi}.{pi}.step"),
+                Tensor::from_vec(vec![st.step as i64], 1, &device)?,
+            );
             out.insert(format!("adamw.{gi}.{pi}.exp_avg"), st.exp_avg.clone());
             out.insert(format!("adamw.{gi}.{pi}.exp_avg_sq"), st.exp_avg_sq.clone());
         }
         for (gi, st) in &self.muon_state {
-            out.insert(format!("muon.{gi}.momentum_buffer"), st.momentum_buffer.clone());
-            out.insert(format!("muon.{gi}.second_momentum_buffer"), st.second_momentum_buffer.clone());
+            out.insert(
+                format!("muon.{gi}.momentum_buffer"),
+                st.momentum_buffer.clone(),
+            );
+            out.insert(
+                format!("muon.{gi}.second_momentum_buffer"),
+                st.second_momentum_buffer.clone(),
+            );
         }
         Ok(out)
     }
@@ -377,8 +401,12 @@ impl MuonAdamW {
             let parts: Vec<&str> = key.split('.').collect();
             match parts.as_slice() {
                 ["adamw", gi, pi, field] => {
-                    let gi: usize = gi.parse().map_err(|_| candle_core::Error::Msg(format!("bad key {key}")))?;
-                    let pi: usize = pi.parse().map_err(|_| candle_core::Error::Msg(format!("bad key {key}")))?;
+                    let gi: usize = gi
+                        .parse()
+                        .map_err(|_| candle_core::Error::Msg(format!("bad key {key}")))?;
+                    let pi: usize = pi
+                        .parse()
+                        .map_err(|_| candle_core::Error::Msg(format!("bad key {key}")))?;
                     let group = &self.param_groups[gi];
                     let entry = self.adamw_state.entry((gi, pi)).or_insert(AdamWState {
                         step: 0,
@@ -393,7 +421,9 @@ impl MuonAdamW {
                     }
                 }
                 ["muon", gi, field] => {
-                    let gi: usize = gi.parse().map_err(|_| candle_core::Error::Msg(format!("bad key {key}")))?;
+                    let gi: usize = gi
+                        .parse()
+                        .map_err(|_| candle_core::Error::Msg(format!("bad key {key}")))?;
                     let zeros = tensor.zeros_like()?;
                     let entry = self.muon_state.entry(gi).or_insert(MuonState {
                         momentum_buffer: zeros.clone(),

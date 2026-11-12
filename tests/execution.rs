@@ -18,7 +18,14 @@ fn test_happy_path() {
 fn test_exception_is_captured() {
     let result = execute_code("1/0", 5.0);
     assert!(!result.success);
-    assert!(result.error.as_deref().unwrap().contains("ZeroDivisionError"), "{result:?}");
+    assert!(
+        result
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("ZeroDivisionError"),
+        "{result:?}"
+    );
 }
 
 #[test]
@@ -27,7 +34,10 @@ fn test_timeout_kills_infinite_loop() {
     let result = execute_code("while True: pass", 2.0);
     let elapsed = start.elapsed().as_secs_f64();
     assert!(result.timeout && !result.success);
-    assert!(elapsed < 5.0, "process was not killed promptly ({elapsed:.1}s)");
+    assert!(
+        elapsed < 5.0,
+        "process was not killed promptly ({elapsed:.1}s)"
+    );
 }
 
 #[test]
@@ -85,7 +95,10 @@ fn test_environment_is_scrubbed() {
     std::env::set_var("FAKE_SECRET_KEY", "hunter2");
     let result = execute_code("import os; print('FAKE_SECRET_KEY' in os.environ)", 5.0);
     std::env::remove_var("FAKE_SECRET_KEY");
-    assert!(result.success && result.stdout.trim() == "False", "{result:?}");
+    assert!(
+        result.success && result.stdout.trim() == "False",
+        "{result:?}"
+    );
 }
 
 #[test]

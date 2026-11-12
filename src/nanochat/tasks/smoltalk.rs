@@ -16,7 +16,10 @@ pub struct SmolTalk {
 
 impl SmolTalk {
     pub fn new(split: &str, slice: Slice) -> Result<Self> {
-        assert!(split == "train" || split == "test", "SmolTalk split must be train|test");
+        assert!(
+            split == "train" || split == "test",
+            "SmolTalk split must be train|test"
+        );
         let rows = load_shuffled("HuggingFaceTB/smol-smoltalk", "default", split)?;
         Ok(Self::from_rows(rows, slice))
     }
@@ -45,8 +48,15 @@ impl Task for SmolTalk {
         let messages = row["messages"].as_array().expect("messages must be a list");
         // sanity checking: an optional system message, then alternating user/assistant
         assert!(!messages.is_empty());
-        let rest = if messages[0]["role"] == "system" { &messages[1..] } else { &messages[..] };
-        assert!(rest.len() >= 2, "SmolTalk messages must have at least 2 messages");
+        let rest = if messages[0]["role"] == "system" {
+            &messages[1..]
+        } else {
+            &messages[..]
+        };
+        assert!(
+            rest.len() >= 2,
+            "SmolTalk messages must have at least 2 messages"
+        );
         for (i, message) in rest.iter().enumerate() {
             let expected_role = if i % 2 == 0 { "user" } else { "assistant" };
             assert!(

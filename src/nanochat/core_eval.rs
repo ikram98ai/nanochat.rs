@@ -1,7 +1,7 @@
 //! Functions for evaluating the CORE metric, as described in the DCLM paper.
 //! https://arxiv.org/abs/2406.11794
 
-use candle_core::{D, IndexOp, Result, Tensor};
+use candle_core::{IndexOp, Result, Tensor, D};
 use serde_json::Value;
 
 use super::gpt::{cross_entropy, GPT};
@@ -17,7 +17,11 @@ fn s(v: &Value) -> &str {
 }
 
 /// Render complete prompts for a multiple choice question
-pub fn render_prompts_mc(item: &Value, continuation_delimiter: &str, fewshot_examples: &[Value]) -> Vec<String> {
+pub fn render_prompts_mc(
+    item: &Value,
+    continuation_delimiter: &str,
+    fewshot_examples: &[Value],
+) -> Vec<String> {
     let mut prefix = String::new();
     for example in fewshot_examples {
         let gold = example["gold"].as_u64().unwrap() as usize;
@@ -32,12 +36,23 @@ pub fn render_prompts_mc(item: &Value, continuation_delimiter: &str, fewshot_exa
         .as_array()
         .unwrap()
         .iter()
-        .map(|choice| format!("{prefix}{}{}{}", s(&item["query"]), continuation_delimiter, s(choice)))
+        .map(|choice| {
+            format!(
+                "{prefix}{}{}{}",
+                s(&item["query"]),
+                continuation_delimiter,
+                s(choice)
+            )
+        })
         .collect()
 }
 
 /// Render complete prompts for a schema question
-pub fn render_prompts_schema(item: &Value, continuation_delimiter: &str, fewshot_examples: &[Value]) -> Vec<String> {
+pub fn render_prompts_schema(
+    item: &Value,
+    continuation_delimiter: &str,
+    fewshot_examples: &[Value],
+) -> Vec<String> {
     let mut prefix = String::new();
     for example in fewshot_examples {
         let gold = example["gold"].as_u64().unwrap() as usize;
@@ -53,7 +68,12 @@ pub fn render_prompts_schema(item: &Value, continuation_delimiter: &str, fewshot
         .unwrap()
         .iter()
         .map(|context_option| {
-            format!("{prefix}{}{}{}", s(context_option), continuation_delimiter, s(&item["continuation"]))
+            format!(
+                "{prefix}{}{}{}",
+                s(context_option),
+                continuation_delimiter,
+                s(&item["continuation"])
+            )
         })
         .collect()
 }
@@ -61,7 +81,11 @@ pub fn render_prompts_schema(item: &Value, continuation_delimiter: &str, fewshot
 /// Render complete prompts for a language modeling task: [without, with] continuation.
 /// The contexts are trimmed (some datasets have trailing whitespace), and the
 /// without-prompt is stripped so the token-space prefix property holds.
-pub fn render_prompts_lm(item: &Value, continuation_delimiter: &str, fewshot_examples: &[Value]) -> Vec<String> {
+pub fn render_prompts_lm(
+    item: &Value,
+    continuation_delimiter: &str,
+    fewshot_examples: &[Value],
+) -> Vec<String> {
     let mut prefix = String::new();
     for example in fewshot_examples {
         prefix.push_str(&format!(
@@ -71,7 +95,11 @@ pub fn render_prompts_lm(item: &Value, continuation_delimiter: &str, fewshot_exa
             s(&example["continuation"])
         ));
     }
-    let base = format!("{prefix}{}{}", s(&item["context"]).trim(), continuation_delimiter);
+    let base = format!(
+        "{prefix}{}{}",
+        s(&item["context"]).trim(),
+        continuation_delimiter
+    );
     let prompt_without = base.trim().to_string();
     let prompt_with = format!("{base}{}", s(&item["continuation"]));
     vec![prompt_without, prompt_with]
@@ -97,7 +125,11 @@ pub fn find_common_length(token_sequences: &[Vec<u32>], direction: &str) -> usiz
 }
 
 /// Stack up a list of token sequences, pad to longest on the right.
-pub fn stack_sequences(tokens: &[Vec<u32>], pad_token_id: u32, device: &candle_core::Device) -> Result<Tensor> {
+pub fn stack_sequences(
+    tokens: &[Vec<u32>],
+    pad_token_id: u32,
+    device: &candle_core::Device,
+) -> Result<Tensor> {
     let bsz = tokens.len();
     let seq_len = tokens.iter().map(|x| x.len()).max().unwrap();
     let mut data = vec![pad_token_id as i64; bsz * seq_len];
@@ -121,7 +153,10 @@ fn encode_with_bos(tokenizer: &Tokenizer, prompts: &[String]) -> Vec<Vec<u32>> {
 }
 
 /// In multiple choice, contexts are the same but the continuation is different (common prefix)
-pub fn batch_sequences_mc(tokenizer: &Tokenizer, prompts: &[String]) -> (Vec<Vec<u32>>, Vec<usize>, Vec<usize>) {
+pub fn batch_sequences_mc(
+    tokenizer: &Tokenizer,
+    prompts: &[String],
+) -> (Vec<Vec<u32>>, Vec<usize>, Vec<usize>) {
     let tokens = encode_with_bos(tokenizer, prompts);
     let answer_start_idx = find_common_length(&tokens, "left");
     let start_indices = vec![answer_start_idx; prompts.len()];
@@ -130,7 +165,10 @@ pub fn batch_sequences_mc(tokenizer: &Tokenizer, prompts: &[String]) -> (Vec<Vec
 }
 
 /// In schema tasks, contexts vary but continuation is the same (common suffix)
-pub fn batch_sequences_schema(tokenizer: &Tokenizer, prompts: &[String]) -> (Vec<Vec<u32>>, Vec<usize>, Vec<usize>) {
+pub fn batch_sequences_schema(
+    tokenizer: &Tokenizer,
+    prompts: &[String],
+) -> (Vec<Vec<u32>>, Vec<usize>, Vec<usize>) {
     let tokens = encode_with_bos(tokenizer, prompts);
     let suffix_length = find_common_length(&tokens, "right");
     let end_indices: Vec<usize> = tokens.iter().map(|x| x.len()).collect();
@@ -139,11 +177,17 @@ pub fn batch_sequences_schema(tokenizer: &Tokenizer, prompts: &[String]) -> (Vec
 }
 
 /// In LM tasks, we have two prompts: without and with continuation (batch size 1)
-pub fn batch_sequences_lm(tokenizer: &Tokenizer, prompts: &[String]) -> (Vec<Vec<u32>>, Vec<usize>, Vec<usize>) {
+pub fn batch_sequences_lm(
+    tokenizer: &Tokenizer,
+    prompts: &[String],
+) -> (Vec<Vec<u32>>, Vec<usize>, Vec<usize>) {
     let tokens = encode_with_bos(tokenizer, prompts);
     let (tokens_without, tokens_with) = (&tokens[0], &tokens[1]);
     let (start_idx, end_idx) = (tokens_without.len(), tokens_with.len());
-    assert!(start_idx < end_idx, "prompt without is supposed to be a prefix of prompt with");
+    assert!(
+        start_idx < end_idx,
+        "prompt without is supposed to be a prefix of prompt with"
+    );
     assert!(
         tokens_without[..] == tokens_with[..start_idx],
         "prompt without is supposed to be a prefix of prompt with"
@@ -159,11 +203,15 @@ pub fn forward_model(model: &GPT, input_ids: &Tensor) -> Result<(Tensor, Tensor)
     let outputs = model.forward(input_ids, None, None, "mean")?;
     // Roll the tensor to the left by one position to get the (autoregressive) target ids
     let target_ids = Tensor::cat(
-        &[input_ids.narrow(1, 1, seq_len - 1)?, input_ids.narrow(1, 0, 1)?],
+        &[
+            input_ids.narrow(1, 1, seq_len - 1)?,
+            input_ids.narrow(1, 0, 1)?,
+        ],
         1,
     )?;
     // Cross entropy at all positions (no ignore_index; ids are always valid)
-    let losses = cross_entropy(&outputs, &target_ids, -1, "none")?.reshape((batch_size, seq_len))?;
+    let losses =
+        cross_entropy(&outputs, &target_ids, -1, "none")?.reshape((batch_size, seq_len))?;
     // Get the argmax predictions at each position
     let predictions = outputs.argmax(D::Minus1)?;
     Ok((losses, predictions))
@@ -235,7 +283,10 @@ pub fn evaluate_example(
             // For MC/schema: find the option with lowest average loss
             let mut mean_losses = Vec::with_capacity(start_idxs.len());
             for (i, (&si, &ei)) in start_idxs.iter().zip(end_idxs.iter()).enumerate() {
-                let mean = losses.i((i, si - 1..ei - 1))?.mean_all()?.to_scalar::<f32>()?;
+                let mean = losses
+                    .i((i, si - 1..ei - 1))?
+                    .mean_all()?
+                    .to_scalar::<f32>()?;
                 mean_losses.push(mean);
             }
             // index of the minimum, ties keep the first
